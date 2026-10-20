@@ -25,8 +25,36 @@
   opacity: 0.5;
 }
 
-/* 面包屑上的本文档开关：开启时高亮 */
-.gw-doc-toggle--on {
+/* 改稿模式、光标在段落中间：建议以卡片形式显示在光标所在行的下方，不遮挡原文 */
+.gw-ghost--card {
+  padding: 2px 8px;
+  border: 1px solid var(--b3-border-color);
+  border-radius: var(--b3-border-radius);
+  background-color: var(--b3-menu-background);
+  box-shadow: var(--b3-dialog-shadow);
+}
+
+/* 面包屑上的本文档模式按钮：写作 / 改稿用不同颜色，并加角标文字区分 */
+.gw-doc-mode--write,
+.gw-doc-mode--revise {
+  position: relative;
+}
+.gw-doc-mode--write {
   color: var(--b3-theme-primary) !important;
   background-color: var(--b3-theme-primary-lightest);
 }
+.gw-doc-mode--revise {
+  color: var(--b3-card-success-color) !important;
+  background-color: var(--b3-card-success-background);
+}
+.gw-doc-mode--write::after,
+.gw-doc-mode--revise::after {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  font-size: 9px;
+  line-height: 1;
+  font-weight: bold;
+}
+.gw-doc-mode--write::after { content: "W"; }
+.gw-doc-mode--revise::after { content: "R"; }

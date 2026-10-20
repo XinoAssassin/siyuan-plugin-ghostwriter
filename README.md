@@ -1,20 +1,26 @@
 # Ghost Writer
 
-When you type sentence punctuation, Ghost Writer asks an OpenAI-compatible LLM for your most likely next sentence and shows it as grey ghost text after the caret. Press `Tab` to accept it.
+When you type punctuation, Ghost Writer asks an OpenAI-compatible LLM for a one-sentence suggestion and shows it as grey ghost text at the caret. Press `Tab` to accept it. There are two modes:
 
-> **Every document is off by default.** After setting an API key, turn Ghost Writer on for each document you want it in (see below). Until you do, nothing happens and no request is sent.
+- **Writing mode:** continues at the end of a paragraph, reads only the text before the caret, and predicts the next sentence.
+- **Revision mode:** the caret may be mid-paragraph; it reads the text before *and after* the caret and suggests one sentence to insert at the caret that bridges both.
+
+Each mode has its own prompts, and the default prompts come in Chinese and English, following SiYuan's interface language.
+
+> **Every document is off by default.** After setting an API key, choose a mode for each document you want it in (see below). Documents that are off show nothing and send no requests.
 
 ## Usage
 
-### Turning it on
+### Choosing a mode
 
-- **Per document (default off):** use any of these. The choice is remembered per document.
-  - the ghost button in the editor breadcrumb bar (highlighted when on)
-  - the document title icon menu → "Ghost Writer: on/off for this document"
-  - the command "Ghost Writer: toggle for this document", which has no default shortcut. You can bind one in Settings → Keymap, in the plugin section.
-- **Global switch:** `Alt+Shift+G` (or "Enabled" in the plugin settings). This turns predictions on or off everywhere without changing the per-document choices.
+- **Per document: Off / Writing mode / Revision mode (default off).** Use any of these; the choice is remembered per document.
+  - Click the ghost button in the editor's breadcrumb bar (top right) and pick a mode from the menu. The button's colour and badge show the current mode: theme colour with a "W" badge for writing, green with an "R" badge for revision.
+  - The document title icon menu → "Ghost Writer: <current mode>" submenu.
+  - The command "Ghost Writer: cycle mode for this document" (off → writing → revision). It has no default shortcut; you can bind one in Settings → Keymap, in the plugin section.
+- **Global switch:** `Alt+Shift+G` (or "Enabled" in the plugin settings). This turns predictions on or off everywhere without changing the per-document modes.
+- When upgrading from 0.1.0, documents that were switched on become writing mode.
 
-### Writing with suggestions
+### Writing mode
 
 - A prediction is requested after you type one of the trigger punctuation marks (default `，。！？；：,.!?;:`) and pause for the debounce delay (default 400 ms).
 - It is only requested when all of these hold:
@@ -23,6 +29,16 @@ When you type sentence punctuation, Ghost Writer asks an OpenAI-compatible LLM f
   - the editor is not read-only
 - No predictions in code, math, HTML, table, database, iframe, widget, video or audio blocks, or inside embed blocks.
 - `Tab` accepts the suggestion. Ghost Writer then predicts the following sentence straight away, so you can keep pressing `Tab` to keep writing.
+
+### Revision mode
+
+- Works with the caret mid-paragraph or at the end: type a trigger punctuation mark at the caret (for example add a "，" after a sentence) and pause. IME, read-only and block-type restrictions are the same as in writing mode.
+- Besides the preceding text and the paragraph up to the caret, it also sends the rest of the paragraph after the caret and the following blocks (also capped by "Max context characters"). The model returns one sentence to **insert at the caret** that connects what comes before and after.
+- When there is text after the caret, the suggestion is shown as a small card below the current line so it doesn't cover your text. At the end of a paragraph it is shown inline, as in writing mode.
+- `Tab` inserts the suggestion at the caret. Revision is a single insertion, so no follow-up prediction is made after accepting.
+
+### Both modes
+
 - `Esc` dismisses it. Typing, clicking, moving the caret, scrolling or leaving the editor also dismisses it.
 - `Tab` and `Esc` are left to SiYuan while its hint menu is open (`/`, `[[`, `((`, `:` and similar). No predictions are requested then either.
 - While a suggestion is showing, `Tab` accepts it instead of indenting a list item. `Shift+Tab` and `Ctrl+Tab` are never intercepted.
@@ -40,12 +56,12 @@ Settings → Marketplace → Downloaded → Ghost Writer → ⚙:
 | API key | Required. Without a key no request is ever made. Local servers that need no key (Ollama, LM Studio, …) still need a dummy value such as `local`. |
 | Model | Default: `deepseek-flash` |
 | Debounce delay (ms) | 100–60000, default 400 |
-| Max context characters | How much preceding text is sent. 200–1000000, default 1500 |
+| Max context characters | How much preceding text is sent (and, in revision mode, following text). 200–1000000, default 1500 |
 | Trigger punctuation | Characters that trigger a prediction |
 | Route via kernel forwardProxy | See [CORS and forwardProxy](#cors-and-forwardproxy) |
 | Extra request body (JSON) | See [Extra request body](#extra-request-body) |
 | Temperature | 0–2. Lower stays closer to your text, higher is more creative. Default 0.7 |
-| System prompt / User message template | See [Custom prompts](#custom-prompts) |
+| System prompt / User message template for writing and revision mode | See [Custom prompts](#custom-prompts) |
 
 For the number fields, an empty or invalid value falls back to the default, and out-of-range values are clamped.
 
@@ -87,31 +103,37 @@ The API key is masked as `***`, long messages are shortened, and the same messag
 
 ## Custom prompts
 
-You can edit these in settings:
+Writing mode and revision mode each have their own prompts, edited separately in settings.
 
-- **System prompt:** the model's role and output rules, such as style, length and language.
+**Default prompts follow SiYuan's interface language:** Chinese (Simplified or Traditional) uses the Chinese defaults; every other language uses the English defaults (which limit suggestions to "about 30 words"). Prompts you have customised are always used as written, whatever the interface language.
+
+
+- **System prompt:** the model's role and output rules, such as style, length and language. The default writing prompt asks for "the next sentence"; the default revision prompt asks for "one sentence to insert at ▍ that bridges the text before and after".
 - **User message template:** you can use these variables (full-width `｛｛ ｝｝` braces also work):
   - `{{title}}`: the document title
   - `{{before}}`: the preceding text
   - `{{current}}`: the current paragraph up to the caret
+  - `{{currentAfter}}`: the current paragraph after the caret (revision mode only)
+  - `{{after}}`: the following text (revision mode only)
 
-  When the document has no title, any line whose only variable is `{{title}}` is removed. If the template doesn't contain `{{current}}`, the current paragraph is appended at the end.
-- **Temperature:** see the table above.
+  The default revision template marks the insertion point as `{{current}}▍{{currentAfter}}`. When the document has no title, any line whose only variable is `{{title}}` is removed. If the template doesn't contain `{{current}}`, the current paragraph is appended at the end.
+- **Temperature:** see the table above; shared by both modes.
 
-Both text areas have a "Restore default" button. Saving one empty, or with exactly the default text, stores "use default", so you get improvements to the built-in prompts automatically.
+All four text areas have a "Restore default" button, which fills in the default for the current interface language. Saving one empty, or with exactly the Chinese or English default text, stores "use default", so you get improvements to the built-in prompts, and the right language after switching the interface language, automatically.
 
 ## Privacy
 
-- **What is sent:** when a prediction is triggered, Ghost Writer sends three things to the LLM service you configured:
+- **What is sent:** when a prediction is triggered, Ghost Writer sends the following to the LLM service you configured:
   - the document title
   - the text of the blocks before the current one that are loaded in the editor, up to "Max context characters" (default 1500)
   - the current paragraph up to the caret
+  - in revision mode also: the rest of the paragraph after the caret, and the text of the following blocks loaded in the editor (also up to "Max context characters")
 
   Only connect to services you trust.
-- **When requests are made:** only when the global switch is on, the current document is switched on and an API key is set. With forwardProxy on, the request is sent from the machine running the SiYuan kernel.
+- **When requests are made:** only when the global switch is on, the current document is in writing or revision mode and an API key is set. With forwardProxy on, the request is sent from the machine running the SiYuan kernel.
 - **What is stored:**
   - The settings, including the API key in plain text, are stored in `data/storage/petal/siyuan-plugin-ghostwriter/config.json`.
-  - The IDs of documents you switched on are stored in `docs.json` next to it.
+  - Each document's mode (document ID → writing / revision) is stored in `docs.json` next to it.
   - Both files are synced with your workspace.
 - Ghost Writer has no telemetry and no other network access.
 

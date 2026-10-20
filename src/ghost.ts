@@ -1,6 +1,6 @@
 import type { IProtyle } from "siyuan";
 import type GhostWriterPlugin from "./index";
-import { predictNextSentence } from "./llm";
+import { predictNextSentence, type GWMode } from "./llm";
 
 const ZW = /[\u200b\u200c\u200d\ufeff]/g;
 const SKIP_BLOCK_TYPES = new Set([
@@ -55,6 +55,8 @@ export class GhostWriter {
   private suggestion = "";
   private anchor: Anchor | undefined;
   private breadcrumbObserver: MutationObserver | undefined;
+  /** 当前建议是否以卡片形式显示在光标所在行的下方（改稿模式、光标在段中） */
+  private card = false;
 
   constructor(public readonly protyle: IProtyle, private plugin: GhostWriterPlugin) {
     this.el = protyle.wysiwyg!.element;
@@ -100,8 +102,9 @@ export class GhostWriter {
   private onInput = (e: Event) => {
     if ((e as InputEvent).isComposing) return; // 中文输入法组字阶段不触发
     this.cancel();
-    if (!this.isActive()) return;
-    const ctx = this.collectContext();
+    const mode = this.activeMode();
+    if (!mode) return;
+    const ctx = this.collectContext(mode);
     if (!ctx || !this.endsWithTrigger(ctx.current)) return;
     this.timer = window.setTimeout(() => this.request(), this.plugin.config.delay);
   };
@@ -117,7 +120,7 @@ export class GhostWriter {
 
   private onKeydown = (e: KeyboardEvent) => {
     if (!this.suggestion || e.isComposing) return;
-    if (!this.isActive()) {
+    if (!this.activeMode()) {
       // 已关闭、只读或思源提示菜单打开：不再拦截 Tab / Esc
       this.hide();
       return;
@@ -151,7 +154,11 @@ export class GhostWriter {
     return !!last && this.plugin.config.triggerChars.includes(last);
   }
 
-  private collectContext() {
+  /**
+   * 收集光标处的上下文。写作模式只在块尾触发、只读上文；
+   * 改稿模式允许光标在段中，并读取光标后的段落剩余部分与后续块。
+   */
+  private collectContext(mode: GWMode) {
     const sel = window.getSelection();
     if (!sel || sel.rangeCount === 0) return null;
     const range = sel.getRangeAt(0);
@@ -174,26 +181,28 @@ export class GhostWriter {
     const current = r.toString().replace(ZW, "");
     r.setStart(range.startContainer, range.startOffset);
     r.setEnd(editable, editable.childNodes.length);
-    const after = r.toString().replace(ZW, "").trim();
-    if (after) return null; // 只在块尾预测
+    const rest = r.toString().replace(ZW, "");
+    if (mode === "write" && rest.trim()) return null; // 写作模式只在块尾预测
+    const currentAfter = rest.trim() ? rest.replace(/\s+$/, "") : "";
 
-    // 前文：文档中当前块之前的所有叶子块文本
+    // 前文：文档中当前块之前的所有叶子块文本；后文（仅改稿模式）：当前块之后的叶子块文本
     const editables = Array.from(
       this.el.querySelectorAll<HTMLElement>('[data-node-id] > [contenteditable="true"]'));
     const idx = editables.indexOf(editable);
-    const parts: string[] = [];
-    for (let i = 0; i < idx; i++) {
-      const t = plainText(editables[i]).trim();
-      if (t) parts.push(t);
-    }
-    let before = parts.join("\n");
+    const textsOf = (list: HTMLElement[]) => list.map((e) => plainText(e).trim()).filter(Boolean).join("\n");
     const max = this.plugin.config.contextChars;
+    let before = textsOf(editables.slice(0, Math.max(0, idx)));
     if (before.length > max) before = "…" + before.slice(-max);
+    let after = "";
+    if (mode === "revise" && idx >= 0) {
+      after = textsOf(editables.slice(idx + 1));
+      if (after.length > max) after = after.slice(0, max) + "…";
+    }
 
     const title = this.protyle.element.querySelector(".protyle-title__input")?.textContent?.trim() || "";
 
     return {
-      title, before, current, range, editable,
+      title, before, current, currentAfter, after, range, editable,
       anchor: { node: range.startContainer, offset: range.startOffset, blockId: block.getAttribute("data-node-id")! } as Anchor,
     };
   }
@@ -206,29 +215,37 @@ export class GhostWriter {
     return !!h && !h.classList.contains("fn__none");
   }
 
-  /** 全局开关、API Key、只读状态、本文档开关都满足，且提示菜单未打开时才工作 */
-  private isActive(): boolean {
+  /**
+   * 全局开关、API Key、只读状态都满足、提示菜单未打开时，返回本文档的模式；
+   * 本文档未开启或不满足条件时返回 null。
+   */
+  private activeMode(): GWMode | null {
     const c = this.plugin.config;
-    return c.enabled && !!c.apiKey && !this.protyle.disabled
-      && this.plugin.isDocEnabled(this.protyle.block?.rootID) && !this.hintOpen();
+    if (!c.enabled || !c.apiKey || this.protyle.disabled || this.hintOpen()) return null;
+    const mode = this.plugin.docMode(this.protyle.block?.rootID);
+    return mode === "off" ? null : mode;
   }
 
   private async request() {
-    if (!this.isActive()) return;
-    const ctx = this.collectContext();
+    const mode = this.activeMode();
+    if (!mode) return;
+    const ctx = this.collectContext(mode);
     if (!ctx || !this.endsWithTrigger(ctx.current)) return;
     const seq = ++this.seq;
     this.abort?.abort();
     this.abort = new AbortController();
     this.anchor = ctx.anchor;
+    // 光标后还有文字时不能把建议盖在原文上，改为在该行下方显示卡片
+    this.card = !!ctx.currentAfter;
     this.render("", ctx.range, ctx.editable, true);
 
     try {
       const text = await predictNextSentence(this.plugin.config, {
-        title: ctx.title, before: ctx.before, current: ctx.current, signal: this.abort.signal,
+        mode, lang: this.plugin.promptLang, title: ctx.title, before: ctx.before, current: ctx.current,
+        currentAfter: ctx.currentAfter, after: ctx.after, signal: this.abort.signal,
       });
       if (seq !== this.seq) return;
-      if (!this.anchor || !this.isActive()) return this.hide();
+      if (!this.anchor || this.activeMode() !== mode) return this.hide();
       // 光标还在原处才显示
       const sel = window.getSelection();
       if (!sel || sel.rangeCount === 0) return this.hide();
@@ -242,7 +259,7 @@ export class GhostWriter {
       this.hide();
       if (err?.name === "AbortError") return;
       console.warn("[ghostwriter]", err);
-      if (this.isActive()) this.plugin.reportRequestError(err);
+      if (this.activeMode()) this.plugin.reportRequestError(err);
     }
   }
 
@@ -260,9 +277,16 @@ export class GhostWriter {
     o.style.font = cs.font;
     o.style.lineHeight = cs.lineHeight;
     o.style.letterSpacing = cs.letterSpacing;
+    o.classList.toggle("gw-ghost--card", this.card);
 
     const remain = edRect.right - rect.right;
-    if (remain < 120) {
+    if (this.card) {
+      // 改稿模式、光标在段中：卡片放在光标所在行的下方，不遮挡同一行里光标后的文字
+      const left = Math.max(edRect.left, Math.min(rect.left, edRect.right - 240));
+      o.style.left = left + "px";
+      o.style.top = rect.bottom + 4 + "px";
+      o.style.maxWidth = Math.max(240, edRect.right - left) + "px";
+    } else if (remain < 120) {
       // 右侧放不下：折到下一行行首
       o.style.left = edRect.left + "px";
       o.style.top = rect.bottom + "px";
@@ -287,10 +311,12 @@ export class GhostWriter {
     const text = this.suggestion;
     const anchor = this.anchor;
     this.hide();
-    if (!text || !anchor || !this.isActive()) return;
+    const mode = this.activeMode();
+    if (!text || !anchor || !mode) return;
     if (!this.insertLiteral(text, anchor.blockId)) return;
-    // 采纳的句子通常也以标点结尾，顺势预测下一句，形成连续写作
-    if (this.plugin.config.chainAfterAccept) {
+    // 写作模式：采纳的句子通常也以标点结尾，顺势预测下一句，形成连续写作。
+    // 改稿模式是单点插入，不自动续接
+    if (mode === "write" && this.plugin.config.chainAfterAccept) {
       this.timer = window.setTimeout(() => this.request(), this.plugin.config.delay);
     }
   }
