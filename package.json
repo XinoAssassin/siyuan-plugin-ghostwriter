@@ -1,0 +1,20 @@
+{
+  "name": "siyuan-plugin-ghostwriter",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "vite build --watch",
+    "build": "vite build",
+    "package": "vite build --mode package",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "adm-zip": "^0.6.1",
+    "siyuan": "^1.2.6",
+    "typescript": "^5.6.0",
+    "vite": "^5.4.0",
+    "vite-plugin-static-copy": "^2.0.0"
+  }
+}

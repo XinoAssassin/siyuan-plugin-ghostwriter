@@ -1,0 +1,32 @@
+.gw-ghost {
+  position: fixed;
+  pointer-events: none;
+  z-index: 200;
+  color: var(--b3-theme-on-surface-light);
+  /* 不透明背景：折行后的建议压在后续块上时仍然可读 */
+  background-color: var(--b3-theme-background);
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: none;
+}
+.gw-ghost__hint {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 4px;
+  font-size: 10px;
+  line-height: 14px;
+  border: 1px solid var(--b3-border-color);
+  border-radius: 3px;
+  vertical-align: middle;
+  opacity: 0.8;
+}
+.gw-ghost--loading::after {
+  content: "…";
+  opacity: 0.5;
+}
+
+/* 面包屑上的本文档开关：开启时高亮 */
+.gw-doc-toggle--on {
+  color: var(--b3-theme-primary) !important;
+  background-color: var(--b3-theme-primary-lightest);
+}
