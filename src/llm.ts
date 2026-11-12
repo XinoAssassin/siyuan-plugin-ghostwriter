@@ -123,6 +123,21 @@ export interface LLMRequest {
   currentAfter: string;  // 当前块光标后文本（写作模式恒为空）
   after: string;         // 当前块之后的上下文（仅改稿模式）
   signal: AbortSignal;
+  /** 作者在同一插入点上已否决的候选（手机端「换一句」），附在用户消息末尾，并稍微提高温度 */
+  avoid?: string[];
+}
+
+/** 「换一句」时在配置温度上增加的量（上限 2）；extraBody 里的 temperature 仍然优先 */
+export const REGENERATE_TEMPERATURE_BOOST = 0.3;
+
+/** 附在用户消息末尾的「已否决候选」说明；没有候选时为空串。与用户自定义的模板无关，始终生效 */
+export function avoidNote(avoid: string[] | undefined, lang: PromptLang = "zh"): string {
+  const list = (avoid || []).map((s) => s.trim()).filter(Boolean);
+  if (!list.length) return "";
+  const head = lang === "en"
+    ? "[Rejected candidates] The author rejected the following sentences. Write one that is clearly different in wording or content:"
+    : "【作者已否决的候选】以下句子作者不满意，请给出说法或内容明显不同的一句：";
+  return [head, ...list.map((s) => "- " + s)].join("\n");
 }
 
 type TemplateVars = Pick<LLMRequest, "title" | "before" | "current"> & Partial<Pick<LLMRequest, "currentAfter" | "after">>;
@@ -179,10 +194,12 @@ export function promptsFor(cfg: GWConfig, mode: GWMode, lang: PromptLang = "zh")
 }
 
 export function buildMessages(cfg: GWConfig, req: LLMRequest) {
-  const { system, template: tpl } = promptsFor(cfg, req.mode, req.lang ?? "zh");
+  const lang = req.lang ?? "zh";
+  const { system, template: tpl } = promptsFor(cfg, req.mode, lang);
+  const note = avoidNote(req.avoid, lang);
   return [
     { role: "system", content: system },
-    { role: "user", content: renderTemplate(tpl, req) },
+    { role: "user", content: renderTemplate(tpl, req) + (note ? "\n\n" + note : "") },
   ];
 }
 
@@ -204,8 +221,9 @@ export function normalizeBaseURL(baseURL: string): string | null {
 
 /** 请求体：extraBody 可覆盖 temperature、max_tokens 等，但不能覆盖 model、messages、stream */
 export function buildRequestBody(cfg: GWConfig, req: LLMRequest) {
+  const base = cfg.temperature ?? 0.7;
   return {
-    temperature: cfg.temperature ?? 0.7,
+    temperature: req.avoid?.length ? Math.min(2, Math.round((base + REGENERATE_TEMPERATURE_BOOST) * 100) / 100) : base,
     max_tokens: 80,
     ...parseExtraBody(cfg.extraBody),
     model: cfg.model,

@@ -1,5 +1,6 @@
-import { Menu, Plugin, Setting, getAllEditor, showMessage, IProtyle } from "siyuan";
+import { Menu, Plugin, Setting, getAllEditor, getFrontend, showMessage, IProtyle } from "siyuan";
 import { GhostWriter } from "./ghost";
+import type { BarLabels } from "./mobile";
 import {
   GhostWriterError, PROMPT_KEYS, REQUEST_TIMEOUT_MS, defaultPrompt, isDefaultPrompt, normalizeBaseURL, parseExtraBody,
   promptLangFor, type GWMode, type PromptKey, type PromptLang,
@@ -29,6 +30,10 @@ export interface GWConfig {
   reviseSystemPrompt: string;
   reviseUserTemplate: string;
   temperature: number;
+  /** 手机端的防抖延迟：手机打字慢，输入法上屏也慢，输入标点后要等更久才请求，默认比桌面端长很多 */
+  mobileDelay: number;
+  /** 手机端点按灰字：开启时采纳到所点分句的结尾，关闭时采纳整句 */
+  mobileClauseAccept: boolean;
 }
 
 /** 文档的预测模式：关闭 / 写作 / 改稿 */
@@ -52,6 +57,8 @@ const DEFAULT_CONFIG: GWConfig = {
   reviseSystemPrompt: "",
   reviseUserTemplate: "",
   temperature: 0.7,
+  mobileDelay: 1500,
+  mobileClauseAccept: true,
 };
 
 const STORAGE = "config.json";
@@ -72,6 +79,8 @@ export default class GhostWriterPlugin extends Plugin {
   private docModes = new Map<string, GWMode>();
   private breadcrumbId = BREADCRUMB_ID;
   private errorShownAt = new Map<string, number>();
+  /** 思源移动端界面（App 或手机浏览器）：启用键盘上方的操作栏和点按采纳 */
+  readonly isMobile = ["mobile", "browser-mobile"].includes(getFrontend());
 
   async onload() {
     this.loadConfig(await this.loadData(STORAGE));
@@ -163,6 +172,21 @@ export default class GhostWriterPlugin extends Plugin {
     showMessage(escaped, 6000, "error");
   }
 
+  /** 显示一条普通提示（i18n 键） */
+  notify(key: string) {
+    const t = this.i18n as Record<string, string>;
+    showMessage(t[key] || key, 3000);
+  }
+
+  /** 手机端操作栏的文案 */
+  barLabels(): BarLabels {
+    const t = this.i18n as Record<string, string>;
+    return {
+      accept: t.barAccept, regenerate: t.barRegenerate, dismiss: t.barDismiss,
+      continue: t.barContinue, mode: t.docMode,
+    };
+  }
+
   onLayoutReady() {
     getAllEditor().forEach((e) => this.attach(e.protyle));
   }
@@ -178,9 +202,15 @@ export default class GhostWriterPlugin extends Plugin {
     return (rootID && this.docModes.get(rootID)) || "off";
   }
 
-  private modeLabel(mode: DocMode): string {
+  modeLabel(mode: DocMode): string {
     const t = this.i18n as Record<string, string>;
     return mode === "write" ? t.modeWrite : mode === "revise" ? t.modeRevise : t.modeOff;
+  }
+
+  /** 手机端操作栏上的短名称：写作 / 改稿 */
+  shortModeLabel(mode: GWMode): string {
+    const t = this.i18n as Record<string, string>;
+    return mode === "write" ? t.modeWriteShort : t.modeReviseShort;
   }
 
   private setDocMode(protyle: IProtyle, mode: DocMode) {
@@ -218,11 +248,21 @@ export default class GhostWriterPlugin extends Plugin {
     const rect = target?.getBoundingClientRect();
     // 思源在同一次 click 中调用面包屑回调后会清空公共菜单（实测在回调后 ~1ms），
     // 所以创建和打开菜单都放到这次 click 处理完之后
-    setTimeout(() => {
-      const menu = new Menu("gw-doc-mode");
-      this.modeMenuItems(protyle).forEach((item) => menu.addItem(item));
-      menu.open(rect ? { x: rect.right, y: rect.bottom, isLeft: true } : { x: e.clientX, y: e.clientY });
-    });
+    setTimeout(() => this.showModeMenu(protyle, rect ? { x: rect.right, y: rect.bottom, isLeft: true } : { x: e.clientX, y: e.clientY }));
+  }
+
+  /** 手机端操作栏的模式按钮：弹出「关闭 / 写作模式 / 改稿模式」 */
+  openModeMenuAt(button: HTMLElement, protyle: IProtyle) {
+    const rect = button.getBoundingClientRect();
+    setTimeout(() => this.showModeMenu(protyle, { x: rect.left, y: rect.top }));
+  }
+
+  /** 桌面端在指定位置弹出菜单；手机端用思源的底部菜单 */
+  private showModeMenu(protyle: IProtyle, position: { x: number; y: number; isLeft?: boolean }) {
+    const menu = new Menu("gw-doc-mode");
+    this.modeMenuItems(protyle).forEach((item) => menu.addItem(item));
+    if (this.isMobile) menu.fullscreen();
+    else menu.open(position);
   }
 
   /** 把每个编辑器面包屑上的按钮同步为其文档的模式 */
@@ -312,7 +352,7 @@ export default class GhostWriterPlugin extends Plugin {
       confirmCallback: () => {
         const t = this.i18n as Record<string, string>;
         /** 空值用默认值，非有限数用默认值，其余夹在 [min, max] */
-        const num = (key: "delay" | "contextChars" | "temperature", min: number, max: number) => {
+        const num = (key: "delay" | "mobileDelay" | "contextChars" | "temperature", min: number, max: number) => {
           const raw = inputs[key]!.value.trim();
           const n = Number(raw);
           return raw && Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : DEFAULT_CONFIG[key];
@@ -324,6 +364,8 @@ export default class GhostWriterPlugin extends Plugin {
         this.config.apiKey = inputs.apiKey!.value.trim();
         this.config.model = inputs.model!.value.trim();
         this.config.delay = Math.round(num("delay", 100, 60000));
+        this.config.mobileDelay = Math.round(num("mobileDelay", 100, 60000));
+        this.config.mobileClauseAccept = (inputs.mobileClauseAccept as HTMLInputElement).checked;
         this.config.contextChars = Math.round(num("contextChars", 200, 1000000));
         this.config.temperature = num("temperature", 0, 2);
         this.config.triggerChars = inputs.triggerChars!.value || DEFAULT_CONFIG.triggerChars;
@@ -346,6 +388,8 @@ export default class GhostWriterPlugin extends Plugin {
     this.setting.addItem({ title: t.apiKey, createActionElement: () => text("apiKey", "password") });
     this.setting.addItem({ title: t.model, createActionElement: () => text("model") });
     this.setting.addItem({ title: t.delay, createActionElement: () => text("delay", "number") });
+    this.setting.addItem({ title: t.mobileDelay, createActionElement: () => text("mobileDelay", "number") });
+    this.setting.addItem({ title: t.mobileClauseAccept, description: t.mobileClauseAcceptDesc, createActionElement: () => check("mobileClauseAccept") });
     this.setting.addItem({ title: t.contextChars, createActionElement: () => text("contextChars", "number") });
     this.setting.addItem({ title: t.triggerChars, createActionElement: () => text("triggerChars") });
     this.setting.addItem({ title: t.useProxy, createActionElement: () => check("useProxy") });

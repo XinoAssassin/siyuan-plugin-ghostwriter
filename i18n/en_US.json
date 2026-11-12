@@ -35,5 +35,15 @@
   "reviseSystemPrompt": "Revision mode · System prompt",
   "reviseSystemPromptDesc": "Revision mode: the caret may be mid-paragraph; text before and after it is read and one sentence to insert at the caret is generated. Saving it empty restores the default. The default follows the SiYuan interface language (Chinese / English).",
   "reviseUserTemplate": "Revision mode · User message template",
-  "reviseUserTemplateDesc": "Variables: {{title}} document title, {{before}} preceding text, {{current}} current paragraph before the caret, {{currentAfter}} current paragraph after the caret, {{after}} following text. Lines whose only variable is {{title}} are removed when the title is empty; {{current}} is appended automatically if missing."
+  "reviseUserTemplateDesc": "Variables: {{title}} document title, {{before}} preceding text, {{current}} current paragraph before the caret, {{currentAfter}} current paragraph after the caret, {{after}} following text. Lines whose only variable is {{title}} are removed when the title is empty; {{current}} is appended automatically if missing.",
+  "mobileDelay": "Debounce delay on mobile (ms)",
+  "mobileClauseAccept": "Mobile: tapping the ghost text accepts only up to the tapped clause",
+  "mobileClauseAcceptDesc": "When on, tapping a spot in the ghost text accepts it up to the end of that clause and keeps the rest as a suggestion. When off, a tap accepts the whole sentence. The Accept button above the keyboard always accepts the whole sentence.",
+  "modeWriteShort": "Write",
+  "modeReviseShort": "Revise",
+  "barAccept": "Accept",
+  "barRegenerate": "Another",
+  "barDismiss": "Dismiss suggestion",
+  "barContinue": "Continue",
+  "errContinueAtEnd": "Ghost Writer: in Writing mode, Continue only works at the end of a paragraph. Move the caret to the end, or switch to Revision mode."
 }

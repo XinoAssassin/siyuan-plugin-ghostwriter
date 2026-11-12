@@ -44,7 +44,23 @@ Each mode has its own prompts, and the default prompts come in Chinese and Engli
 - While a suggestion is showing, `Tab` accepts it instead of indenting a list item. `Shift+Tab` and `Ctrl+Tab` are never intercepted.
 - The ghost text is an overlay. It never touches the document or the undo stack until you accept it.
 - Accepted text is inserted literally. Markdown characters such as `*`, `$` or `((` are escaped, so they render as plain text. In a raw Markdown export they appear with a backslash.
-- Desktop only (desktop app, desktop windows and desktop browser). The plugin is not loaded on mobile or on publish-service pages.
+- Works on desktop (desktop app, desktop windows and desktop browser) and mobile (SiYuan app and mobile browser). The plugin is not loaded on publish-service pages.
+
+### On a phone
+
+Software keyboards have no `Tab` or `Esc`, so SiYuan's mobile interface uses taps instead:
+
+- **Action bar:** while you edit a document that has a mode, a bar appears above the keyboard (above SiYuan's keyboard toolbar).
+  - On the left, "Write ▾ / Revise ▾" shows the current mode. Tap it to switch.
+  - With no suggestion, the right side shows **Continue**: it requests a sentence right away, with no punctuation needed. In writing mode it only works at the end of a paragraph.
+  - With a suggestion, the right side shows **Another ✕ Accept**. **Another** tells the model the previous sentence was rejected and raises the temperature by 0.3. **✕** dismisses the suggestion. **Accept** inserts the whole sentence.
+  - A thin progress line runs along the top of the bar while a request is in flight.
+- **Tap the ghost text** to accept only up to the end of the tapped clause (clauses end at `,`, `;`, `:`, `.`, `!`, `?`, `，`, `、`, `。` and similar). The rest stays as the suggestion, so you can accept it clause by clause. A setting switches taps to accept the whole sentence.
+- Tapping the bar or the ghost text never takes focus from the editor, so the keyboard stays open.
+- The ghost text is shown in a smaller 12px font, at most 3 lines. If the bar would cover it, the editor scrolls up. Scrolling and viewport changes (such as the keyboard opening) reposition the suggestion instead of dismissing it.
+- Mobile has its own debounce delay (default 1500 ms): typing and IME commits are slow on a phone, so it waits longer after the punctuation before requesting. Pending requests are cancelled when the app goes to the background.
+- With a hardware keyboard, `Tab` and `Esc` still work.
+- Mobile browsers apply CORS like desktop browsers. If requests fail with a CORS error, turn on [forwardProxy](#cors-and-forwardproxy).
 
 ## Setup
 
@@ -56,6 +72,8 @@ Settings → Marketplace → Downloaded → Ghost Writer → ⚙:
 | API key | Required. Without a key no request is ever made. Local servers that need no key (Ollama, LM Studio, …) still need a dummy value such as `local`. |
 | Model | Default: `deepseek-flash` |
 | Debounce delay (ms) | 100–60000, default 400 |
+| Debounce delay on mobile (ms) | Used in SiYuan's mobile interface. 100–60000, default 1500 |
+| Mobile: tapping the ghost text accepts only up to the tapped clause | Default on. When off, a tap accepts the whole sentence |
 | Max context characters | How much preceding text is sent (and, in revision mode, following text). 200–1000000, default 1500 |
 | Trigger punctuation | Characters that trigger a prediction |
 | Route via kernel forwardProxy | See [CORS and forwardProxy](#cors-and-forwardproxy) |

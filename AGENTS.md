@@ -11,9 +11,12 @@ overlay next to the caret: `Tab` accepts it, `Esc` dismisses it.
   caret) or **revise** (caret may be mid-paragraph; reads text before *and* after; suggests one sentence to insert at
   the caret). Each mode has its own system prompt and user template.
 - There is a global on/off switch (`Alt+Shift+G`).
+- On SiYuan's mobile interface (`mobile` / `browser-mobile`) there is no Tab key, so a bar above the keyboard offers
+  mode / Continue / Another / ✕ / Accept, and tapping the ghost text accepts up to the tapped clause (see *Mobile*).
 
 - Marketplace: listed through `siyuan-note/bazaar` PR #2367 (`plugins.txt` line `XinoAssassin/siyuan-plugin-ghostwriter`).
-- Targets SiYuan ≥ 3.8.4 (developed and tested on 3.8.7), desktop / desktop-window / browser-desktop only.
+- Targets SiYuan ≥ 3.8.4 (developed on 3.8.7; 0.3.0 E2E-tested on 3.8.9 and tried on real Android and iOS phones), on
+  desktop / desktop-window / browser-desktop and mobile / browser-mobile.
 
 ## File map
 
@@ -21,8 +24,9 @@ overlay next to the caret: `Tab` accepts it, `Esc` dismisses it.
 |---|---|
 | `src/index.ts` | Plugin entry (`GhostWriterPlugin`). Config load/save and settings UI, per-document mode (`docModes`, `docs.json`), breadcrumb button + mode menu, title-icon submenu, commands, error toasts, attaching one `GhostWriter` per editor. |
 | `src/ghost.ts` | `GhostWriter`, one per editor instance (protyle). Input/IME/keyboard handling, context collection, request lifecycle, overlay rendering, accept/insert. |
+| `src/mobile.ts` | Mobile-only, no `siyuan` runtime imports. `clauseEnd` (clause-accept length), `bindTap` (tap without stealing focus), `charIndexAt`/`distanceToRect` (which ghost character was tapped), `MobileBar` (the bar above the keyboard, positioned from `visualViewport` and `#keyboardToolbar`). |
 | `src/llm.ts` | Pure logic, unit-testable. `GWMode`, prompt defaults for both modes, `promptsFor`, `renderTemplate`, request-body construction, `extraBody`/baseURL validation, response normalization (`contentText`, `clean`), `predictNextSentence` (direct `fetch` or kernel `forwardProxy`), `GhostWriterError`. |
-| `src/index.css` | Overlay (`.gw-ghost*`, `.gw-ghost--card` for mid-paragraph revise suggestions) and breadcrumb button state (`.gw-doc-mode--write` / `--revise`, with W/R badge). |
+| `src/index.css` | Overlay (`.gw-ghost*`, `.gw-ghost--card` for mid-paragraph revise suggestions, `.gw-ghost--mobile` tappable), mobile bar (`.gw-bar*`) and breadcrumb button state (`.gw-doc-mode--write` / `--revise`, with W/R badge). |
 | `i18n/zh_CN.json`, `i18n/en_US.json` | UI strings. **Keep keys in parity.** `err*` keys are error toasts, with `{param}` placeholders. |
 | `vite.config.ts` | Build. `dev`/`build` → `SIYUAN_PLUGIN_DIR` (env or git-ignored `.env.local`), falling back to `dist/`; `package` → clean `dist/` + `package.zip` (adm-zip). |
 | `plugin.json` | Marketplace manifest. `name` must equal the repo name; locale keys are BCP 47 (`zh-CN`). |
@@ -47,8 +51,29 @@ overlay next to the caret: `Tab` accepts it, `Esc` dismisses it.
 closed && mode ≠ off; otherwise null.
 
 What cancels or hides a suggestion:
-- **Cancels:** `compositionstart`, `mousedown`, `focusout`.
-- **Hides:** scroll, resize, `switch-protyle`, a caret move (`selectionchange`), saving settings with the plugin disabled, changing the doc's mode.
+- **Cancels:** `compositionstart`, `mousedown`, `focusout`; on mobile also `visibilitychange` to hidden and the bar's ✕.
+- **Hides:** scroll and resize (desktop only; mobile repositions instead), `switch-protyle`, a caret move
+  (`selectionchange`), saving settings with the plugin disabled, changing the doc's mode.
+
+### Mobile (`plugin.isMobile`: `getFrontend()` is `mobile` or `browser-mobile`)
+
+- Each `GhostWriter` owns a `MobileBar`. `syncBar()` shows it only while the doc has an active mode **and** focus is
+  inside the editor (i.e. the soft keyboard is up). It is called from `hide()`, `render()`, `focusin` and (deferred)
+  `focusout`.
+- Delay is `mobileDelay` (default 1500: phone typing and IME commits are slow) instead of `delay`.
+- Loading: no inline "…" placeholder; the bar shows a progress line.
+- Rendering: `MOBILE_GHOST_FONT_PX` (12px) font, vertically centred on the caret line when inline (card: line-height 1.5); no Tab hint; at most `MOBILE_MAX_LINES` (3) lines; `keepAboveBar()` scrolls `.protyle-content` if the bar
+  would cover the ghost text.
+- **Continue** = `manualRequest()` → `request({ manual: true })`, which skips the trigger-punctuation check. Write mode
+  still requires the caret at block end; otherwise a toast (`errContinueAtEnd`) and no request.
+- **Another** = `regenerate()`: pushes the current suggestion to `avoid` (max 5, reset on input, Continue and accept) and
+  requests with `avoid`. `buildMessages` appends `avoidNote()` after the rendered template (so custom templates get it
+  too), and `buildRequestBody` raises temperature by `REGENERATE_TEMPERATURE_BOOST` (0.3, rounded, capped at 2;
+  `extraBody` still wins).
+- **Tap on ghost text** (`onGhostTap`): `charIndexAt` + `clauseEnd` → `accept(length)`. A partial accept inserts the
+  prefix, then on the next tick `showRemainder()` re-anchors at the new caret and shows the rest. No chained request
+  until the whole suggestion is accepted. `mobileClauseAccept: false` makes a tap accept the whole sentence.
+- Hardware-keyboard `Tab` / `Esc` keep working on mobile.
 
 ## Invariants and hard-won gotchas (do not regress)
 
@@ -113,6 +138,19 @@ What cancels or hides a suggestion:
     the shared `#commonMenu` ~1 ms later in the same click. Build *and* open the `Menu` in a `setTimeout`, otherwise it
     flashes and disappears. Verify with real mouse events (CDP `Input.dispatchMouseEvent`), not `element.click()` alone.
     In menu items, `checked: true` renders SiYuan's checkmark and `current: true` adds `b3-menu__item--selected`.
+15. **Mobile taps must not move focus.** Tapping the bar or the ghost text would blur the editor, close the soft
+    keyboard and cancel the suggestion via `focusout`. `bindTap` calls `preventDefault()` on `pointerdown`, `touchstart`
+    (non-passive), `mousedown` and `click`, and acts on `pointerup` inside the element. Bar buttons have `tabIndex = -1`.
+    Never act on `click` alone.
+16. **Mobile repositions, desktop hides.** On mobile the soft keyboard, address bar and SiYuan's caret scrolling fire
+    `scroll`/`resize`/`visualViewport` events constantly; hiding on them makes suggestions vanish immediately. `reflow`
+    is `reposition` (rAF-throttled, re-renders at the anchor, hides if the anchor node is detached) on mobile and
+    `hide` on desktop. Keep the desktop behaviour unchanged.
+17. **Partial accept timing.** `accept()` clears the anchor before inserting, so the `selectionchange` caused by the
+    insert is ignored; `showRemainder` runs in a `setTimeout` guarded by `seq`, so typing in between drops it.
+18. **Ghost-text hit testing** uses per-character `Range.getClientRects()`, not `caretRangeFromPoint`, because the
+    overlay is `user-select: none`.
+19. **Mode menu on mobile** uses `Menu.fullscreen()` (`showModeMenu`); desktop keeps `menu.open(position)` in a `setTimeout`.
 
 ## Build, test, release
 
@@ -132,9 +170,11 @@ SIYUAN_PLUGIN_DIR=<workspace>/data/plugins/siyuan-plugin-ghostwriter
 - A brand-new workspace also needs Settings → Marketplace → trust third-party plugins turned on.
 
 ### Testing expectations
-- **Unit:** bundle `src/llm.ts` plus `escapeMarkdownInline`/`isPlainTextRender` from `src/ghost.ts` with esbuild,
-  aliasing `siyuan` to a stub, then run `node --test`. Cover: `renderTemplate`, `clean`, request body, `extraBody`/baseURL
-  validation, `contentText`, and `predictNextSentence` error mapping (401, reasoning-only, length, non-JSON, abort, proxy codes).
+- **Unit:** bundle `src/llm.ts` plus `escapeMarkdownInline`/`isPlainTextRender` from `src/ghost.ts` and
+  `clauseEnd`/`distanceToRect` from `src/mobile.ts` with esbuild, aliasing `siyuan` to a stub, then run `node --test`.
+  Cover: `renderTemplate`, `clean`, request body (incl. the regenerate temperature boost), `avoidNote`,
+  `extraBody`/baseURL validation, `contentText`, `clauseEnd` (CJK/English clauses, decimals, quotes), and
+  `predictNextSentence` error mapping (401, reasoning-only, length, non-JSON, abort, proxy codes).
 - **E2E:** use a real SiYuan desktop with `--remote-debugging-port`, driven over the Chrome DevTools Protocol (CDP), against a mock OpenAI endpoint.
   - Test **only in a throwaway notebook**, and never persist the plugin settings during tests.
   - With a hidden window, enable `Emulation.setFocusEmulationEnabled`, or key events are dropped.
@@ -148,6 +188,13 @@ SIYUAN_PLUGIN_DIR=<workspace>/data/plugins/siyuan-plugin-ghostwriter
     - hint menu open → Tab passes through;
     - 401 and reasoning-only responses produce toasts;
     - the breadcrumb tooltip is correct right after a reload.
+  - **Mobile:** load `/stage/build/mobile/?id=<doc>` in Chrome with CDP device emulation (`mobile: true`, touch
+    emulation, iPhone UA) and real `Input.dispatchTouchEvent` taps. Minimum scenarios: no bar when off; bar above the
+    keyboard toolbar when on; tap first clause → partial insert + remainder; Accept → insert + chain, focus kept;
+    Another → rejected candidates + temperature 1.0; ✕ dismisses; Continue without punctuation; Continue mid-paragraph
+    in write mode → toast, no request; scroll/viewport shrink keeps the suggestion; mode switch from the bar; revise
+    card + insert at caret; hardware Tab; blur hides the bar; export has no backslashes.
+  - Real devices are still required for IME behaviour (Chinese IMEs on Android, iOS Safari keyboard height).
 
 ### Release checklist (marketplace updates need no new bazaar PR)
 1. Bump `version` in `plugin.json` (and `package.json`), semver.
@@ -168,5 +215,6 @@ SIYUAN_PLUGIN_DIR=<workspace>/data/plugins/siyuan-plugin-ghostwriter
 - Keyless local servers (Ollama, LM Studio) need a dummy API key.
 - Accepted text containing Markdown syntax is stored with backslash escapes, which are visible in raw Markdown export.
 - Leaving the window (Alt-Tab) dismisses the suggestion, because `focusout` fires.
-- No mobile frontends.
+- Mobile: inserting while an Android IME still holds a composing region could desync the IME; suggestions are cancelled
+  on `compositionstart`, but this needs checking on real devices with Gboard / Sogou and iOS Safari.
 - `npm audit` findings in dev dependencies have not been reviewed.

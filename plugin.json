@@ -2,7 +2,7 @@
   "name": "siyuan-plugin-ghostwriter",
   "author": "Xino Ni",
   "url": "https://github.com/XinoAssassin/siyuan-plugin-ghostwriter",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "minAppVersion": "3.8.4",
   "disabledInPublish": true,
   "backends": [
@@ -11,15 +11,17 @@
   "frontends": [
     "desktop",
     "desktop-window",
-    "browser-desktop"
+    "browser-desktop",
+    "mobile",
+    "browser-mobile"
   ],
   "displayName": {
     "default": "Ghost Writer",
     "zh-CN": "写稿助手"
   },
   "description": {
-    "default": "Inline LLM next-sentence suggestions shown as ghost text after punctuation. Press Tab to accept.",
-    "zh-CN": "在标点后实时以灰色幽灵文字提示 LLM 预测的下一句，按 Tab 采纳。"
+    "default": "Inline LLM next-sentence suggestions shown as ghost text after punctuation. Press Tab to accept, or tap on mobile.",
+    "zh-CN": "在标点后实时以灰色幽灵文字提示 LLM 预测的下一句，按 Tab 采纳；手机上点按采纳。"
   },
   "readme": {
     "default": "README.md",

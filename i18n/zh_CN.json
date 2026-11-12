@@ -35,5 +35,15 @@
   "reviseSystemPrompt": "改稿模式 · 系统提示词",
   "reviseSystemPromptDesc": "改稿模式：光标可在段落中间，读取前后文，生成适合插入光标处的一句话。留空保存会恢复默认。默认值跟随思源界面语言（中文 / 英文）。",
   "reviseUserTemplate": "改稿模式 · 用户消息模板",
-  "reviseUserTemplateDesc": "可用变量：{{title}} 文档标题、{{before}} 前文、{{current}} 光标前的当前段落、{{currentAfter}} 光标后的当前段落、{{after}} 后文。标题为空时，只含 {{title}} 一个变量的行会被删除；模板中没有 {{current}} 时会自动附在末尾。"
+  "reviseUserTemplateDesc": "可用变量：{{title}} 文档标题、{{before}} 前文、{{current}} 光标前的当前段落、{{currentAfter}} 光标后的当前段落、{{after}} 后文。标题为空时，只含 {{title}} 一个变量的行会被删除；模板中没有 {{current}} 时会自动附在末尾。",
+  "mobileDelay": "手机端防抖延迟（毫秒）",
+  "mobileClauseAccept": "手机端：点按灰字只采纳到所点分句",
+  "mobileClauseAcceptDesc": "开启时点按灰字中的某处，采纳到该处所在分句的结尾，剩余部分继续保留为建议；关闭时点按灰字采纳整句。键盘上方的「采纳」按钮始终采纳整句。",
+  "modeWriteShort": "写作",
+  "modeReviseShort": "改稿",
+  "barAccept": "采纳",
+  "barRegenerate": "换一句",
+  "barDismiss": "关闭建议",
+  "barContinue": "续写",
+  "errContinueAtEnd": "写稿助手：写作模式只能在段落末尾续写，请把光标移到段尾，或切换到改稿模式"
 }
