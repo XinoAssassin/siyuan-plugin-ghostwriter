@@ -5,7 +5,7 @@ Notes for coding agents and maintainers. Read this before changing code or cutti
 ## What it is
 
 A SiYuan Note frontend plugin. When the user types sentence punctuation at the end of a block, it asks an
-OpenAI-compatible `/chat/completions` endpoint for the next sentence. The answer is shown as grey "ghost text" in an
+LLM for the next sentence, through the Google Gemini native API (`generateContent`) or an OpenAI-compatible`n`/chat/completions` endpoint (`apiFormat`: auto by default, see invariant 21). The answer is shown as grey "ghost text" in an
 overlay next to the caret: `Tab` accepts it, `Esc` dismisses it.
 - Each document has a mode: **off** (default), **write** (continue at the end of a block; reads only text before the
   caret) or **revise** (caret may be mid-paragraph; reads text before *and* after; suggests one sentence to insert at
@@ -15,7 +15,7 @@ overlay next to the caret: `Tab` accepts it, `Esc` dismisses it.
   mode / Continue / Another / ✕ / Accept, and tapping the ghost text accepts up to the tapped clause (see *Mobile*).
 
 - Marketplace: listed through `siyuan-note/bazaar` PR #2367 (`plugins.txt` line `XinoAssassin/siyuan-plugin-ghostwriter`).
-- Targets SiYuan ≥ 3.8.4 (developed on 3.8.7; 0.3.0 E2E-tested on 3.8.9 and tried on real Android and iOS phones), on
+- Targets SiYuan ≥ 3.8.4 (developed on 3.8.7; 0.3.x E2E-tested on 3.8.9 and tried on real Android and iOS phones), on
   desktop / desktop-window / browser-desktop and mobile / browser-mobile.
 
 ## File map
@@ -25,7 +25,7 @@ overlay next to the caret: `Tab` accepts it, `Esc` dismisses it.
 | `src/index.ts` | Plugin entry (`GhostWriterPlugin`). Config load/save and settings UI, per-document mode (`docModes`, `docs.json`), breadcrumb button + mode menu, title-icon submenu, commands, error toasts, attaching one `GhostWriter` per editor. |
 | `src/ghost.ts` | `GhostWriter`, one per editor instance (protyle). Input/IME/keyboard handling, context collection, request lifecycle, overlay rendering, accept/insert. |
 | `src/mobile.ts` | Mobile-only, no `siyuan` runtime imports. `clauseEnd` (clause-accept length), `bindTap` (tap without stealing focus), `charIndexAt`/`distanceToRect` (which ghost character was tapped), `MobileBar` (the bar above the keyboard, positioned from `visualViewport` and `#keyboardToolbar`). |
-| `src/llm.ts` | Pure logic, unit-testable. `GWMode`, prompt defaults for both modes, `promptsFor`, `renderTemplate`, request-body construction, `extraBody`/baseURL validation, response normalization (`contentText`, `clean`), `predictNextSentence` (direct `fetch` or kernel `forwardProxy`), `GhostWriterError`. |
+| `src/llm.ts` | Pure logic, unit-testable. `GWMode`, prompt defaults for both modes, `promptsFor`, `renderTemplate`, request-body construction, `extraBody`/baseURL validation, response normalization (`contentText`, `clean`, `geminiResult`), Gemini request building (`buildGeminiRequestBody`, `filterExtraBody`, `thinkingFromEffort`), format auto-detection (`geminiBaseCandidates`, `prefersGemini`, `canTryNext`/`isWeakFailure`, `EndpointCache`), `predictNextSentence` (direct `fetch` or kernel `forwardProxy`), `GhostWriterError`. |
 | `src/index.css` | Overlay (`.gw-ghost*`, `.gw-ghost--card` for mid-paragraph revise suggestions, `.gw-ghost--mobile` tappable), mobile bar (`.gw-bar*`) and breadcrumb button state (`.gw-doc-mode--write` / `--revise`, with W/R badge). |
 | `i18n/zh_CN.json`, `i18n/en_US.json` | UI strings. **Keep keys in parity.** `err*` keys are error toasts, with `{param}` placeholders. |
 | `vite.config.ts` | Build. `dev`/`build` → `SIYUAN_PLUGIN_DIR` (env or git-ignored `.env.local`), falling back to `dist/`; `package` → clean `dist/` + `package.zip` (adm-zip). |
@@ -98,18 +98,27 @@ What cancels or hides a suggestion:
    intercept Tab/Esc while SiYuan's hint menu (`[[`, `((`, `:` emoji, `/`) is open.
 6. **Stale responses.** Every async boundary re-checks `seq` / anchor / `isActive()`. The proxy path cannot truly abort the
    upstream call (the kernel finishes its own request), so the `seq` check is what keeps results correct.
-7. **Request body.** The order is `defaults → ...extraBody → model/messages/stream:false` (re-asserted last).
-   - `extraBody` must be a JSON **object**, validated on save and at request time.
-   - It may override `max_tokens`/`temperature` (needed for Gemini).
+7. **Request body.** `extraBody` must be a JSON **object**, validated on save and at request time. `filterExtraBody`
+   splits it per format: Gemini takes only top-level GenerateContentRequest keys (`generationConfig`, `safetySettings`,
+   `toolConfig`, `cachedContent`, `serviceTier`, `labels`), OpenAI takes everything else, so one setting can hold both.
+   - OpenAI: `defaults → ...extraBody → model/messages/stream:false` (re-asserted last); may override `max_tokens`/`temperature`.
+   - Gemini: `deepMerge({generationConfig:{temperature, maxOutputTokens:1024}}, geminiExtra)`, then `systemInstruction` and
+     `contents` re-asserted. If `generationConfig` doesn't set them, `reasoning_effort` → `thinkingConfig`
+     (`thinkingBudget` on `gemini-2.5*`, else `thinkingLevel`; none/minimal → low) and `max_tokens`/`max_completion_tokens`
+     → `maxOutputTokens`. Without this, 3.8 Flash ran at its default `medium` thinking: ~11 s vs ~2 s at `low`.
 8. **Thinking models.**
    - Gemini 3.x cannot fully disable thinking (2.5 can with `reasoning_effort: "none"`).
    - Gemini's `max_tokens` includes thinking tokens, so a small value yields empty `content`.
    - Empty content plus `reasoning_content` or `finish_reason: "length"` → `errNoContent` toast (tells the user to disable thinking or raise `max_tokens`).
    - DeepSeek: `{"thinking":{"type":"disabled"}}` (thinking is on by default for `deepseek-flash`).
+   - Gemini native: thought parts (`thought: true`) are skipped; empty text with thoughts or `MAX_TOKENS` →
+     `errNoContentGemini`; `promptFeedback.blockReason` or a safety-type `finishReason` with no text → `errBlocked`;
+     a 200 body without `candidates`/`promptFeedback` → `errBadResponse` (so auto mode falls back).
 9. **Kernel `forwardProxy`** (`/api/network/forwardProxy`):
    - Its HTTP client does **not** use SiYuan's network-proxy setting.
    - It blocks loopback/private addresses when SafeMode is on, so local LLMs must use direct mode.
    - Headers are passed as an array of single-key objects. Response `body` is text with `responseEncoding: "text"`.
+   - Gemini's key goes in the `x-goog-api-key` header, never in the URL (`?key=` would leak into logs and error toasts).
 10. **Errors.**
     - Throw `GhostWriterError(key, params)`; `index.ts#reportRequestError` maps it to an `err*` i18n key.
     - The message is HTML-escaped, the API key is redacted to `***`, it is truncated to 300 chars, and the same message is shown at most once per 60 s.
@@ -151,6 +160,28 @@ What cancels or hides a suggestion:
 18. **Ghost-text hit testing** uses per-character `Range.getClientRects()`, not `caretRangeFromPoint`, because the
     overlay is `user-select: none`.
 19. **Mode menu on mobile** uses `Menu.fullscreen()` (`showModeMenu`); desktop keeps `menu.open(position)` in a `setTimeout`.
+20. **iOS Safari: client coordinates ≠ `position: fixed` coordinates.** With the keyboard open, iOS scrolls the page and
+    `getBoundingClientRect()` differs from a fixed element's `top` by `visualViewport.offsetTop` (0.3.0 put the bar
+    ~146 px too high on an iPhone). Chrome emulation does not show this. Rules:
+    - `MobileBar.position` works only in fixed coordinates: `visualViewport.offsetTop + height`, or the keyboard
+      toolbar's `getComputedStyle().top` (SiYuan positions `#keyboardToolbar` the same way). Never use its client rect.
+    - The ghost overlay is placed from caret rects (client coordinates), then `placeFixed()` measures the overlay's own
+      rect and subtracts the difference.
+    - The mobile E2E reproduces the mismatch with `transform: translateY(-146px)` on `<body>`; 0.3.0 fails that check.
+
+21. **API format auto-detection** (`apiFormat: "auto"`, the default; `predictNextSentence`):
+    - Only models whose name matches `/gemini|gemma/i` are probed (`prefersGemini`). new-api-style relays translate
+      Gemini requests for GPT etc. but drop `systemInstruction` (verified on ai.llc.moe), which wrecks suggestions.
+    - Candidates (`geminiBaseCandidates`): strip `/openai`, `/v1` → `/v1beta`, append `/v1beta` when no version, then the
+      base itself; then OpenAI compatible on the base as entered.
+    - Probe moves on when `canTryNext` (HTTP error, `errBadResponse`, `TypeError`). Never on timeout, abort, `errProxy`,
+      `errNoContent*`, `errBlocked`. Google-style 400 must still move on (relays answer `model not found` that way).
+    - Both fail: report the OpenAI error, unless it is a weak failure (`isWeakFailure`: 404/405, non-Google-style body,
+      bad response, TypeError) and Gemini gave a strong one (e.g. invalid key).
+    - Results are cached per `<normalized base>|<model>` in `plugin.endpointCache` (persisted to `endpoints.json`,
+      max 20). A cached endpoint is dropped and re-probed only on a weak failure; 429/5xx are reported as-is.
+    - The mock (`dev-scratch\\mock-llm.mjs`) answers `/v1beta/models/*:generateContent` in Gemini format, so the mobile
+      E2E runs auto → Gemini native; the desktop core suite uses model `mock` and therefore OpenAI compatible.
 
 ## Build, test, release
 
@@ -174,8 +205,12 @@ SIYUAN_PLUGIN_DIR=<workspace>/data/plugins/siyuan-plugin-ghostwriter
   `clauseEnd`/`distanceToRect` from `src/mobile.ts` with esbuild, aliasing `siyuan` to a stub, then run `node --test`.
   Cover: `renderTemplate`, `clean`, request body (incl. the regenerate temperature boost), `avoidNote`,
   `extraBody`/baseURL validation, `contentText`, `clauseEnd` (CJK/English clauses, decimals, quotes), and
-  `predictNextSentence` error mapping (401, reasoning-only, length, non-JSON, abort, proxy codes).
-- **E2E:** use a real SiYuan desktop with `--remote-debugging-port`, driven over the Chrome DevTools Protocol (CDP), against a mock OpenAI endpoint.
+  `predictNextSentence` error mapping (401, reasoning-only, length, non-JSON, abort, proxy codes), and Gemini
+  (`gemini.test.mjs`: body/mapping/filtering, `geminiResult`, candidates, error classes, auto detection, fallback,
+  cache reuse/invalidation, error choice, proxy headers). Fetch is stubbed per URL.
+- **Live check** (optional, keys never printed): call `predictNextSentence` from the test bundle against a real relay and
+  Google AI Studio (Node needs `NODE_USE_ENV_PROXY=1` + `HTTPS_PROXY` to reach Google from this machine).
+- **E2E:** use a real SiYuan desktop with `--remote-debugging-port`, driven over the Chrome DevTools Protocol (CDP), against the mock LLM (OpenAI and Gemini formats).
   - Test **only in a throwaway notebook**, and never persist the plugin settings during tests.
   - With a hidden window, enable `Emulation.setFocusEmulationEnabled`, or key events are dropped.
   - Minimum scenarios:
@@ -213,6 +248,8 @@ SIYUAN_PLUGIN_DIR=<workspace>/data/plugins/siyuan-plugin-ghostwriter
 - Revise mode uses chat completions with a ▍ marker, not a native FIM endpoint (e.g. DeepSeek FIM beta).
 - Context is character-based and DOM-limited (see invariant 12). There is no token budgeting.
 - Keyless local servers (Ollama, LM Studio) need a dummy API key.
+- Auto format: the first request for a new base URL + Gemini model may cost up to 3 extra failed requests while probing;
+  models whose names don't contain gemini/gemma are never sent to Gemini native unless the format is fixed to it.
 - Accepted text containing Markdown syntax is stored with backslash escapes, which are visible in raw Markdown export.
 - Leaving the window (Alt-Tab) dismisses the suggestion, because `focusout` fires.
 - Mobile: inserting while an Android IME still holds a composing region could desync the IME; suggestions are cancelled

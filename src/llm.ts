@@ -4,6 +4,38 @@ import type { GWConfig } from "./index";
 /** 写作模式：在块尾续写下一句，只读上文；改稿模式：在光标处插入一句，读取前后文 */
 export type GWMode = "write" | "revise";
 
+/**
+ * 实际发送的接口格式：OpenAI 兼容（POST {base}/chat/completions，Authorization: Bearer），
+ * 或 Google Gemini 原生（POST {base}/models/{model}:generateContent，x-goog-api-key）
+ */
+export type WireFormat = "openai" | "gemini";
+/** 设置里的接口格式：auto 先探测 Gemini 原生，不支持时回退到 OpenAI 兼容（见 predictNextSentence） */
+export type APIFormat = "auto" | WireFormat;
+export const API_FORMATS: APIFormat[] = ["auto", "gemini", "openai"];
+export const DEFAULT_BASE_URLS: Record<APIFormat, string> = {
+  auto: "https://api.deepseek.com",
+  openai: "https://api.deepseek.com",
+  gemini: "https://generativelanguage.googleapis.com/v1beta",
+};
+/**
+ * 各格式的默认额外请求参数：OpenAI 兼容默认给 DeepSeek 关闭思考；Gemini 的思考参数因模型而异，默认留空。
+ * 额外参数按格式过滤（filterExtraBody），所以 auto 沿用 OpenAI 兼容的默认值也不会影响 Gemini 请求
+ */
+export const DEFAULT_EXTRA_BODIES: Record<APIFormat, string> = {
+  auto: '{"thinking":{"type":"disabled"}}',
+  openai: '{"thinking":{"type":"disabled"}}',
+  gemini: "",
+};
+/** GenerateContentRequest 里可以由额外参数设置的顶层字段；只属于 Gemini 的字段不会发给 OpenAI 兼容接口 */
+const GEMINI_EXTRA_KEYS = new Set(["generationConfig", "safetySettings", "toolConfig", "cachedContent", "serviceTier", "labels"]);
+/** OpenAI 兼容接口的默认输出上限（一句话足够） */
+export const OPENAI_MAX_TOKENS = 80;
+/**
+ * Gemini 原生接口的默认输出上限。Gemini 3 及以后无法完全关闭思考，而 maxOutputTokens 包含思考 token，
+ * 仍用 80 会只剩思考、没有正文；提示词只要一句话，clean() 也只取第一行
+ */
+export const GEMINI_MAX_OUTPUT_TOKENS = 1024;
+
 export const DEFAULT_SYSTEM_PROMPT = [
   "你是写作续写助手。根据给定上下文，预测作者接下来最可能写的下一句话。",
   "要求：只输出这一句话本身，不要解释、不要引号、不要重复已有文字、不要换行；",
@@ -125,6 +157,8 @@ export interface LLMRequest {
   signal: AbortSignal;
   /** 作者在同一插入点上已否决的候选（手机端「换一句」），附在用户消息末尾，并稍微提高温度 */
   avoid?: string[];
+  /** auto 格式的探测结果缓存；缺省时用模块内的内存缓存 */
+  endpointCache?: EndpointCache;
 }
 
 /** 「换一句」时在配置温度上增加的量（上限 2）；extraBody 里的 temperature 仍然优先 */
@@ -213,22 +247,150 @@ export function parseExtraBody(extraBody: string): Record<string, unknown> {
   return v as Record<string, unknown>;
 }
 
-/** 规范化 API 地址：必须是 http(s) URL，去掉末尾的 / 和误粘贴的 /chat/completions；无效时返回 null */
+/**
+ * 规范化 API 地址：必须是 http(s) URL，去掉末尾的 /，以及误粘贴的 /chat/completions 或
+ * /models/<模型>:generateContent；无效时返回 null
+ */
 export function normalizeBaseURL(baseURL: string): string | null {
-  const s = (baseURL || "").trim().replace(/\/+$/, "").replace(/\/chat\/completions$/i, "").replace(/\/+$/, "");
+  const s = (baseURL || "").trim().replace(/\/+$/, "")
+    .replace(/\/chat\/completions$/i, "")
+    .replace(/\/models\/[^/\s]+:(stream)?generateContent$/i, "")
+    .replace(/\/+$/, "");
   return /^https?:\/\/[^/\s]+/i.test(s) ? s : null;
 }
 
-/** 请求体：extraBody 可覆盖 temperature、max_tokens 等，但不能覆盖 model、messages、stream */
-export function buildRequestBody(cfg: GWConfig, req: LLMRequest) {
+/** 设置里的接口格式；缺省或无效时为 auto */
+export function apiFormatOf(cfg: Partial<Pick<GWConfig, "apiFormat">>): APIFormat {
+  return API_FORMATS.includes(cfg.apiFormat as APIFormat) ? cfg.apiFormat as APIFormat : "auto";
+}
+
+/**
+ * auto 模式下要探测的 Gemini 原生地址（按顺序）。用户通常填的是 OpenAI 兼容地址，而同一服务的
+ * Gemini 原生地址一般在：去掉 /openai（Google AI Studio）、/v1 换成 /v1beta（new-api 等中转）、
+ * 没有版本段时加 /v1beta。最后才是原地址本身。
+ */
+export function geminiBaseCandidates(base: string): string[] {
+  const out: string[] = [];
+  const add = (u: string) => { if (!out.includes(u)) out.push(u); };
+  if (/\/openai$/i.test(base)) add(base.replace(/\/openai$/i, ""));
+  if (/\/v1$/i.test(base)) add(base.replace(/\/v1$/i, "/v1beta"));
+  if (!/\/v\d+(alpha|beta)?\d*(\/|$)/i.test(new URL(base).pathname)) add(base + "/v1beta");
+  add(base);
+  return out;
+}
+
+/** 请求地址与鉴权头。Gemini 的 Key 放在 x-goog-api-key 头里，不放进 URL，避免出现在日志和错误信息中 */
+export function endpointFor(cfg: GWConfig, base: string, wire: WireFormat): { url: string; headers: Record<string, string> } {
+  if (wire === "gemini") {
+    // 允许填写 "models/gemini-x"，与 Gemini 返回的模型名一致
+    const model = (cfg.model || "").trim().replace(/^models\//, "");
+    return {
+      url: `${base}/models/${encodeURIComponent(model)}:generateContent`,
+      headers: { "x-goog-api-key": cfg.apiKey },
+    };
+  }
+  return { url: base + "/chat/completions", headers: { Authorization: `Bearer ${cfg.apiKey}` } };
+}
+
+/** 「换一句」时把温度提高一点（保留两位小数，上限 2） */
+function requestTemperature(cfg: GWConfig, req: LLMRequest): number {
   const base = cfg.temperature ?? 0.7;
+  return req.avoid?.length ? Math.min(2, Math.round((base + REGENERATE_TEMPERATURE_BOOST) * 100) / 100) : base;
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/** 递归合并普通对象，extra 优先；数组和标量整体覆盖 */
+export function deepMerge(base: Record<string, unknown>, extra: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...base };
+  for (const [k, v] of Object.entries(extra)) {
+    out[k] = isPlainObject(v) && isPlainObject(out[k]) ? deepMerge(out[k] as Record<string, unknown>, v) : v;
+  }
+  return out;
+}
+
+/**
+ * 额外请求参数按格式取各自的字段：Gemini 只取 GenerateContentRequest 的顶层字段（generationConfig 等），
+ * OpenAI 兼容丢掉这些字段。这样同一份设置可以同时写两种格式的参数，auto 探测时也不会因为对方不认识的字段而报错
+ */
+export function filterExtraBody(extra: Record<string, unknown>, wire: WireFormat): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(extra).filter(([k]) => GEMINI_EXTRA_KEYS.has(k) === (wire === "gemini")));
+}
+
+/** OpenAI 兼容请求体：extraBody 可覆盖 temperature、max_tokens 等，但不能覆盖 model、messages、stream */
+export function buildRequestBody(cfg: GWConfig, req: LLMRequest) {
   return {
-    temperature: req.avoid?.length ? Math.min(2, Math.round((base + REGENERATE_TEMPERATURE_BOOST) * 100) / 100) : base,
-    max_tokens: 80,
-    ...parseExtraBody(cfg.extraBody),
+    temperature: requestTemperature(cfg, req),
+    max_tokens: OPENAI_MAX_TOKENS,
+    ...filterExtraBody(parseExtraBody(cfg.extraBody), "openai"),
     model: cfg.model,
     messages: buildMessages(cfg, req),
     stream: false,
+  };
+}
+
+/**
+ * Gemini generateContent 请求体。extraBody 按对象递归合并，可以只覆盖 generationConfig 里的部分字段
+ * （如 thinkingConfig、maxOutputTokens）而保留温度；但不能覆盖 systemInstruction 与 contents
+ */
+export function buildGeminiRequestBody(cfg: GWConfig, req: LLMRequest) {
+  const [system, user] = buildMessages(cfg, req);
+  const extra = parseExtraBody(cfg.extraBody);
+  const merged = deepMerge({
+    generationConfig: { temperature: requestTemperature(cfg, req), maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS },
+  }, filterExtraBody(extra, "gemini"));
+  // 沿用为 OpenAI 兼容接口写的参数（与 Google 自己的 OpenAI 兼容层一致），但 generationConfig 里显式设置的优先：
+  // reasoning_effort → thinkingConfig（否则按模型默认的较高思考等级运行，实测慢数倍）；
+  // max_tokens / max_completion_tokens → maxOutputTokens（两者都包含思考 token）
+  const gen = merged.generationConfig as Record<string, unknown>;
+  const own = isPlainObject(extra.generationConfig) ? extra.generationConfig : {};
+  if (isPlainObject(gen)) {
+    if (own.thinkingConfig === undefined) {
+      const thinking = thinkingFromEffort(extra.reasoning_effort, cfg.model);
+      if (thinking) gen.thinkingConfig = thinking;
+    }
+    const maxTokens = extra.max_completion_tokens ?? extra.max_tokens;
+    if (own.maxOutputTokens === undefined && typeof maxTokens === "number" && maxTokens > 0) gen.maxOutputTokens = maxTokens;
+  }
+  return {
+    ...merged,
+    systemInstruction: { parts: [{ text: system.content }] },
+    contents: [{ role: "user", parts: [{ text: user.content }] }],
+  };
+}
+
+/**
+ * 把 OpenAI 的 reasoning_effort 换算成 Gemini 的 thinkingConfig：2.5 系列用 thinkingBudget（按官方对照表），
+ * 其它模型用 thinkingLevel。none / minimal 换成 low：不是每个模型都支持 minimal，3.x 与 4.x 都不能关闭思考。
+ * 不认识的值返回 undefined（不设置）
+ */
+export function thinkingFromEffort(effort: unknown, model: string): Record<string, unknown> | undefined {
+  if (typeof effort !== "string") return undefined;
+  const e = effort.trim().toLowerCase();
+  if (/(^|\/)gemini-2\.5/i.test((model || "").trim())) {
+    const budgets: Record<string, number> = { none: 0, minimal: 1024, low: 1024, medium: 8192, high: 24576 };
+    return e in budgets ? { thinkingBudget: budgets[e] } : undefined;
+  }
+  const levels: Record<string, string> = { none: "low", minimal: "low", low: "low", medium: "medium", high: "high" };
+  return e in levels ? { thinkingLevel: levels[e] } : undefined;
+}
+
+/** Gemini 因安全、引用等原因中止生成的 finishReason：没有正文时提示「被拦截」 */
+const GEMINI_BLOCKED_FINISH = new Set([
+  "SAFETY", "RECITATION", "LANGUAGE", "OTHER", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII",
+]);
+
+/** 取 Gemini 响应的正文：跳过 thought: true 的思考摘要 */
+export function geminiResult(data: any) {
+  const cand = data?.candidates?.[0];
+  const parts: any[] = Array.isArray(cand?.content?.parts) ? cand.content.parts : [];
+  return {
+    text: parts.filter((p) => !p?.thought && typeof p?.text === "string").map((p) => p.text).join(""),
+    thought: parts.some((p) => p?.thought) || (data?.usageMetadata?.thoughtsTokenCount ?? 0) > 0,
+    finishReason: typeof cand?.finishReason === "string" ? cand.finishReason : "",
+    blockReason: typeof data?.promptFeedback?.blockReason === "string" ? data.promptFeedback.blockReason : "",
   };
 }
 
@@ -298,11 +460,122 @@ function parseJSON(text: string): any {
   catch { throw new GhostWriterError("errBadResponse", { detail: text }); }
 }
 
+/** auto 模式探测出的接口：格式与实际使用的地址 */
+export interface ResolvedEndpoint {
+  format: WireFormat;
+  base: string;
+}
+
+/** 探测结果缓存，键为 endpointSignature()。插件传入会持久化的实现，未传时用内存里的 Map */
+export interface EndpointCache {
+  get(sig: string): ResolvedEndpoint | undefined;
+  set(sig: string, value: ResolvedEndpoint): void;
+  delete(sig: string): void;
+}
+const memoryEndpointCache: EndpointCache = new Map<string, ResolvedEndpoint>();
+
+/**
+ * auto 模式只对 Google 的模型（名称含 gemini / gemma）探测 Gemini 原生格式。new-api 等中转会把 Gemini 格式的请求
+ * 转成其它模型（如 GPT）的请求，但实测会丢掉 systemInstruction，建议质量明显变差，所以其它模型直接用 OpenAI 兼容。
+ */
+export function prefersGemini(model: string): boolean {
+  return /gemini|gemma/i.test(model || "");
+}
+
+/** 同一地址和模型只探测一次；换地址或模型后重新探测 */
+export function endpointSignature(base: string, model: string): string {
+  return `${base}|${(model || "").trim()}`;
+}
+
+/** Google 风格的错误体 {"error":{"code":400,"message":"…","status":"INVALID_ARGUMENT"}}；也兼容外层包一层数组 */
+function isGoogleStyleError(detail: unknown): boolean {
+  if (typeof detail !== "string") return false;
+  try {
+    let d = JSON.parse(detail);
+    if (Array.isArray(d)) d = d[0];
+    return typeof d?.error?.status === "string" && /^[A-Z_]+$/.test(d.error.status);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 探测时遇到这个错误能否换下一种地址 / 格式再试：HTTP 错误、响应不是 JSON 或不是该格式的响应、
+ * 直连时的网络 / CORS 错误（TypeError）可以；超时、取消、内核转发失败不重试（换地址也不会好，只会更慢）；
+ * 模型已经应答但没有正文或被拦截时也不重试。
+ * 注意：Google 风格的 400 也要继续试，new-api 等中转对 Gemini 路由上不存在的模型会这样报错。
+ */
+export function canTryNext(err: unknown): boolean {
+  const name = (err as any)?.name;
+  if (name === "AbortError" || name === "TimeoutError") return false;
+  if (err instanceof TypeError) return true;
+  return err instanceof GhostWriterError && (err.key === "errHTTP" || err.key === "errBadResponse");
+}
+
+/**
+ * 「这个地址不支持该格式」的弱失败：404/405、非 Google 风格的错误体、响应不是 JSON 或不是该格式、网络 / CORS 错误。
+ * 用于：缓存的接口只在弱失败时失效（临时的 429 / 500 不会把格式切走）；两种格式都失败时挑更有信息量的错误。
+ */
+export function isWeakFailure(err: unknown): boolean {
+  if (err instanceof TypeError) return true;
+  if (!(err instanceof GhostWriterError)) return false;
+  if (err.key === "errBadResponse") return true;
+  if (err.key !== "errHTTP") return false;
+  const status = Number(err.params.status);
+  return status === 404 || status === 405 || !isGoogleStyleError(err.params.detail);
+}
+
+/**
+ * 预测下一句。接口格式为 gemini / openai 时直接按该格式请求填写的地址。
+ * auto（默认）：Gemini / Gemma 模型先按 geminiBaseCandidates() 依次探测 Gemini 原生接口，都不行时回退到
+ * OpenAI 兼容；其它模型直接用 OpenAI 兼容（见 prefersGemini）。
+ * 成功的结果按地址 + 模型缓存，之后直接使用；缓存的接口出现弱失败（isWeakFailure）时重新探测。
+ * 两种格式都失败时报告 OpenAI 兼容请求的错误；但它只是弱失败、而 Gemini 给出了有意义的错误（如 Key 无效）时，
+ * 报告 Gemini 的错误，避免真正的原因被一个 404 掩盖。
+ */
 export async function predictNextSentence(cfg: GWConfig, req: LLMRequest): Promise<string> {
   const base = normalizeBaseURL(cfg.baseURL);
   if (!base) throw new GhostWriterError("errBaseURL");
-  const url = base + "/chat/completions";
-  const body = buildRequestBody(cfg, req);
+  const setting = apiFormatOf(cfg);
+  if (setting !== "auto") return callOnce(cfg, req, setting, base);
+  if (!prefersGemini(cfg.model)) return callOnce(cfg, req, "openai", base);
+
+  const cache = req.endpointCache ?? memoryEndpointCache;
+  const sig = endpointSignature(base, cfg.model);
+  const known = cache.get(sig);
+  if (known) {
+    try {
+      return await callOnce(cfg, req, known.format, known.base);
+    } catch (err) {
+      if (!isWeakFailure(err)) throw err;
+      cache.delete(sig);
+    }
+  }
+  let geminiError: unknown;
+  for (const geminiBase of geminiBaseCandidates(base)) {
+    if (known?.format === "gemini" && known.base === geminiBase) continue; // 刚刚已经试过
+    try {
+      const result = await callOnce(cfg, req, "gemini", geminiBase);
+      cache.set(sig, { format: "gemini", base: geminiBase });
+      return result;
+    } catch (err) {
+      if (!canTryNext(err)) throw err;
+      if (!isWeakFailure(err)) geminiError ??= err;
+    }
+  }
+  try {
+    const result = await callOnce(cfg, req, "openai", base);
+    cache.set(sig, { format: "openai", base });
+    return result;
+  } catch (err) {
+    throw geminiError && isWeakFailure(err) ? geminiError : err;
+  }
+}
+
+/** 按指定格式和地址请求一次，返回整理后的建议文字 */
+async function callOnce(cfg: GWConfig, req: LLMRequest, format: WireFormat, base: string): Promise<string> {
+  const { url, headers } = endpointFor(cfg, base, format);
+  const body = format === "gemini" ? buildGeminiRequestBody(cfg, req) : buildRequestBody(cfg, req);
 
   let data: any;
   if (cfg.useProxy) {
@@ -312,7 +585,7 @@ export async function predictNextSentence(cfg: GWConfig, req: LLMRequest): Promi
       method: "POST",
       timeout: REQUEST_TIMEOUT_MS,
       contentType: "application/json",
-      headers: [{ Authorization: `Bearer ${cfg.apiKey}` }],
+      headers: Object.entries(headers).map(([k, v]) => ({ [k]: v })),
       payload: body,
       payloadEncoding: "json",
       responseEncoding: "text",
@@ -323,16 +596,28 @@ export async function predictNextSentence(cfg: GWConfig, req: LLMRequest): Promi
   } else {
     const resp = await fetch(url, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${cfg.apiKey}`,
-      },
+      headers: { "Content-Type": "application/json", ...headers },
       body: JSON.stringify(body),
       signal: withTimeout(req.signal, REQUEST_TIMEOUT_MS),
     });
     const text = await resp.text();
     if (!resp.ok) throw new GhostWriterError("errHTTP", { status: resp.status, detail: text });
     data = parseJSON(text);
+  }
+
+  if (format === "gemini") {
+    // 不是 Gemini 响应（例如中转对未知路径返回了别的 JSON）：按响应无效处理，auto 模式会据此回退
+    if (!Array.isArray(data?.candidates) && !data?.promptFeedback) {
+      throw new GhostWriterError("errBadResponse", { detail: JSON.stringify(data).slice(0, 300) });
+    }
+    const g = geminiResult(data);
+    if (g.blockReason) throw new GhostWriterError("errBlocked", { reason: g.blockReason });
+    const result = clean(g.text, req.current, req.currentAfter);
+    if (!result) {
+      if (GEMINI_BLOCKED_FINISH.has(g.finishReason)) throw new GhostWriterError("errBlocked", { reason: g.finishReason });
+      if (g.thought || g.finishReason === "MAX_TOKENS") throw new GhostWriterError("errNoContentGemini");
+    }
+    return result;
   }
 
   const choice = data?.choices?.[0];

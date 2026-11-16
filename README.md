@@ -1,11 +1,13 @@
 # Ghost Writer
 
-When you type punctuation, Ghost Writer asks an OpenAI-compatible LLM for a one-sentence suggestion and shows it as grey ghost text at the caret. Press `Tab` to accept it. There are two modes:
+When you type punctuation, Ghost Writer asks an LLM (through the Google Gemini native API or an OpenAI-compatible API) for a one-sentence suggestion and shows it as grey ghost text at the caret. Press `Tab` to accept it. There are two modes:
 
 - **Writing mode:** continues at the end of a paragraph, reads only the text before the caret, and predicts the next sentence.
 - **Revision mode:** the caret may be mid-paragraph; it reads the text before *and after* the caret and suggests one sentence to insert at the caret that bridges both.
 
 Each mode has its own prompts, and the default prompts come in Chinese and English, following SiYuan's interface language.
+
+The API format is detected automatically by default: Gemini / Gemma models use the Gemini native API when available and fall back to the OpenAI-compatible API; other models use the OpenAI-compatible API. Enter the base URL as usual; see the [API auto-detection rules](#api-auto-detection-rules).
 
 > **Every document is off by default.** After setting an API key, choose a mode for each document you want it in (see below). Documents that are off show nothing and send no requests.
 
@@ -68,7 +70,8 @@ Settings → Marketplace → Downloaded → Ghost Writer → ⚙:
 
 | Setting | Notes |
 |---|---|
-| API base URL | OpenAI-compatible base URL, e.g. `https://api.deepseek.com/v1`. Must start with `http://` or `https://`. A pasted `/chat/completions` suffix is removed. If the URL is invalid, an error is shown and the previous value is kept. Default: `https://api.deepseek.com` |
+| API format | Default "Auto", see [API format](#api-format) and [API auto-detection rules](#api-auto-detection-rules). Can also be fixed to Gemini native or OpenAI compatible |
+| API base URL | E.g. `https://api.deepseek.com/v1` or `https://generativelanguage.googleapis.com/v1beta`. Must start with `http://` or `https://`. A pasted `/chat/completions` or `/models/…:generateContent` suffix is removed. If the URL is invalid, an error is shown and the previous value is kept. Default: `https://api.deepseek.com` |
 | API key | Required. Without a key no request is ever made. Local servers that need no key (Ollama, LM Studio, …) still need a dummy value such as `local`. |
 | Model | Default: `deepseek-flash` |
 | Debounce delay (ms) | 100–60000, default 400 |
@@ -83,22 +86,88 @@ Settings → Marketplace → Downloaded → Ghost Writer → ⚙:
 
 For the number fields, an empty or invalid value falls back to the default, and out-of-range values are clamped.
 
+### API format
+
+| Option | Request | Key sent in |
+|---|---|---|
+| Auto (default) | Format and URL chosen by the [API auto-detection rules](#api-auto-detection-rules) below | the header of the format in use |
+| Google Gemini native | `POST {base}/models/{model}:generateContent` | `x-goog-api-key` header |
+| OpenAI compatible | `POST {base}/chat/completions` | `Authorization: Bearer` header |
+
+With Gemini native or OpenAI compatible selected, only that format is requested, at the base URL as entered, with no probing.
+
+### API auto-detection rules
+
+With the format set to "Auto", the first request probes in this order and remembers the endpoint that works.
+
+**1. Model name**
+
+- The model name contains `gemini` or `gemma` (case-insensitive): probe the Gemini native API first (step 2).
+- Any other model: use the OpenAI-compatible API directly, with no probing. Relays such as new-api also translate Gemini-format requests for GPT and other models, but in testing they dropped the system prompt and suggestions got much worse.
+
+**2. Gemini native URLs to try**
+
+Derived from the base URL you entered, tried in order, each at most once:
+
+1. If the URL ends with `/openai` (Google AI Studio's OpenAI-compatible URL): without `/openai`;
+2. If the URL ends with `/v1` (common on relays): with `/v1` changed to `/v1beta`;
+3. If the URL has no version segment (such as `/v1` or `/v1beta`): with `/v1beta` appended;
+4. The URL as entered.
+
+Each is followed by `/models/{model}:generateContent`. For example, with the model `gemini-3.8-flash`:
+
+| Base URL entered | Gemini native URLs tried, in order | OpenAI-compatible fallback |
+|---|---|---|
+| `https://ai.llc.moe/v1` | `https://ai.llc.moe/v1beta` → `https://ai.llc.moe/v1` | `https://ai.llc.moe/v1/chat/completions` |
+| `https://generativelanguage.googleapis.com/v1beta/openai` | `…/v1beta` → `…/v1beta/openai` | `…/v1beta/openai/chat/completions` |
+| `https://generativelanguage.googleapis.com/v1beta` | `…/v1beta` | `…/v1beta/chat/completions` |
+| `https://api.example.com` | `https://api.example.com/v1beta` → `https://api.example.com` | `https://api.example.com/chat/completions` |
+
+So you can keep entering the OpenAI-compatible base URL.
+
+**3. When it moves on to the next URL**
+
+| Situation | Action |
+|---|---|
+| Any HTTP error (including 400, 401, 404 and 429) | Next URL. Some relays answer a Google-style 400 for models that aren't on their Gemini route, so 400 is retried too |
+| Response is not JSON, or not in Gemini format (no `candidates`) | Next URL |
+| Network or CORS error on a direct connection | Next URL |
+| Timeout, cancellation, or a kernel forwardProxy failure | Stop and show the error (another URL would only be slower) |
+| The model answered but with only thinking, a cut-off output, or a safety block | Stop and show the reason (the endpoint works) |
+
+If no Gemini URL works, the OpenAI-compatible format is requested at the base URL as entered.
+
+**4. Which error is shown when everything fails**
+
+The OpenAI-compatible error, by default. But if that is only a "no such endpoint" kind of error (404, 405, a non-Google-style error, a malformed response, a network error) and Gemini gave a clear reason (for example an invalid key or exhausted quota), the Gemini error is shown, so the real cause isn't hidden behind a 404.
+
+**5. Remembering the result**
+
+- The working format and URL are stored per base URL + model in the plugin data (up to 20 entries) and used directly afterwards, also after restarting SiYuan.
+- Changing the base URL or model probes again.
+- A stored endpoint that returns a "not supported" error (404, 405, malformed response, network error) is forgotten and probed again. A temporary rate limit (429) or server error (5xx) is only reported and keeps the stored format.
+- The first probe may cost a few extra failed requests; after that each suggestion is a single request.
+
+When Gemini native is detected, OpenAI-style fields in the extra request body are converted automatically; see [Extra request body](#extra-request-body).
 ### Extra request body
 
-This field takes a JSON object that is merged into the chat-completions request. It is mostly used to turn off "thinking", which is slow and wastes tokens for one-sentence predictions.
+This field takes a JSON object that is merged into the request. It is mostly used to lower or turn off "thinking", which is slow and wastes tokens for one-sentence predictions.
 
-- It can override `temperature` and `max_tokens` (default 80), but not `model`, `messages` or `stream`.
+- Parameters for both formats can live in the same object; each format takes only its own fields:
+  - **Gemini native** takes top-level Gemini request fields such as `generationConfig` and `safetySettings`, merged object by object. For example `{"generationConfig":{"thinkingConfig":{"thinkingLevel":"low"}}}` leaves the temperature alone.
+  - **OpenAI compatible** takes the other fields. It can override `temperature` and `max_tokens` (default 80), but not `model`, `messages` or `stream`.
+- With Gemini native, OpenAI-style fields are carried over when `generationConfig` doesn't set the same thing: `reasoning_effort` becomes `thinkingConfig` (`thinkingBudget` on 2.5 models; none/minimal become low), and `max_tokens` becomes `maxOutputTokens` (default 1024). Settings written for Gemini's OpenAI-compatible endpoint keep working.
 - It must be a JSON object. If it isn't, saving shows an error and keeps the previous value.
 
 | Provider | Extra request body |
 |---|---|
 | DeepSeek / Zhipu | `{"thinking":{"type":"disabled"}}` (default) |
 | Qwen (DashScope) | `{"enable_thinking":false}` |
-| Gemini 3.x Flash | `{"reasoning_effort":"minimal","max_tokens":512}` (3.8 Flash accepts `"low"` at minimum) |
+| Gemini 3.x / 4.x (native or OpenAI compatible) | `{"reasoning_effort":"low","max_tokens":512}`, or natively `{"generationConfig":{"thinkingConfig":{"thinkingLevel":"low"}}}` |
 | Gemini 2.5 Flash | `{"reasoning_effort":"none"}` |
 | OpenAI and providers that reject unknown fields | leave empty |
 
-**Gemini:** use the base URL `https://generativelanguage.googleapis.com/v1beta/openai`. Gemini counts thinking tokens against `max_tokens`, so the default of 80 can be used up before any text is produced. Add `"max_tokens":512` as in the example above. If the model returns only reasoning, or the output is cut off, Ghost Writer shows a hint to disable thinking or raise `max_tokens`.
+**Gemini:** use `https://generativelanguage.googleapis.com/v1beta` or its OpenAI-compatible URL `…/v1beta/openai`; "Auto" switches to the native API either way. Gemini 3 and later cannot turn thinking off fully, and the output limit includes thinking tokens, so lower it, e.g. `{"generationConfig":{"thinkingConfig":{"thinkingLevel":"low"}}}` or the `{"reasoning_effort":"low"}` from the table (in testing, 3.8 Flash took about 11 s per sentence at its default thinking level and about 2 s at low). If the model returns only thinking or the output is cut off, Ghost Writer suggests lowering thinking or raising the output limit; a safety block is reported with its reason.
 
 ### CORS and forwardProxy
 

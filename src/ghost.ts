@@ -1,7 +1,7 @@
 import type { IProtyle } from "siyuan";
 import type GhostWriterPlugin from "./index";
 import { predictNextSentence, type GWMode } from "./llm";
-import { MobileBar, bindTap, charIndexAt, clauseEnd } from "./mobile";
+import { MobileBar, bindTap, charIndexAt, clauseEnd, placeFixed } from "./mobile";
 
 /** 「换一句」时最多带上几条已否决的候选 */
 const MAX_AVOID = 5;
@@ -333,6 +333,7 @@ export class GhostWriter {
         mode, lang: this.plugin.promptLang, title: ctx.title, before: ctx.before, current: ctx.current,
         currentAfter: ctx.currentAfter, after: ctx.after, signal: this.abort.signal,
         avoid: opts.avoid?.length ? [...opts.avoid] : undefined,
+        endpointCache: this.plugin.endpointCache,
       });
       if (seq !== this.seq) return;
       this.loading = false;
@@ -416,6 +417,9 @@ export class GhostWriter {
     }
     o.style.display = "block";
     if (this.mobile) {
+      // 上面的坐标来自 getBoundingClientRect。iOS Safari 键盘弹出、页面被推上去时，它与 position: fixed
+      // 的定位坐标相差 visualViewport.offsetTop，所以按灰字自身的矩形再校正一次
+      placeFixed(o, parseFloat(o.style.left), parseFloat(o.style.top));
       this.syncBar();
       this.keepAboveBar();
     }

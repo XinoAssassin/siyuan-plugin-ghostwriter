@@ -1,11 +1,13 @@
 # 写稿助手 Ghost Writer
 
-输入标点后，写稿助手会请求 OpenAI 兼容的 LLM 给出一句建议，以灰色幽灵文字显示在光标处，按 `Tab` 采纳。有两种模式：
+输入标点后，写稿助手会请求 LLM（Google Gemini 原生接口或 OpenAI 兼容接口）给出一句建议，以灰色幽灵文字显示在光标处，按 `Tab` 采纳。有两种模式：
 
 - **写作模式**：在段落末尾续写，只读取上文，预测下一句。
 - **改稿模式**：光标可以在段落中间，读取前后文，生成适合插入光标处、承上启下的一句话。
 
 两种模式使用各自的提示词；默认提示词有中文和英文两套，跟随思源界面语言。
+
+接口格式默认自动探测：Gemini / Gemma 模型优先使用 Gemini 原生接口，不支持时回退到 OpenAI 兼容接口；其它模型使用 OpenAI 兼容接口。API 地址照常填写即可，规则见[接口自动探测规则](#接口自动探测规则)。
 
 > **所有文档默认关闭。** 填好 API Key 后，还需要在想用的文档里逐个选择模式（见下文）。关闭的文档不会有任何提示，也不会发出请求。
 
@@ -67,7 +69,8 @@
 
 | 设置项 | 说明 |
 |---|---|
-| API 地址 | OpenAI 兼容地址，如 `https://api.deepseek.com/v1`。必须以 `http://` 或 `https://` 开头，误粘贴的 `/chat/completions` 后缀会被自动去掉。地址无效时会提示错误，并保留原值。默认 `https://api.deepseek.com` |
+| API 格式 | 默认「自动」，见 [API 格式](#api-格式) 与 [接口自动探测规则](#接口自动探测规则)。也可以固定为 Gemini 原生或 OpenAI 兼容 |
+| API 地址 | 如 `https://api.deepseek.com/v1`、`https://generativelanguage.googleapis.com/v1beta`。必须以 `http://` 或 `https://` 开头，误粘贴的 `/chat/completions`、`/models/…:generateContent` 后缀会被自动去掉。地址无效时会提示错误，并保留原值。默认 `https://api.deepseek.com` |
 | API Key | 必填，未填写时不会发出任何请求。不需要 Key 的本地服务（Ollama、LM Studio 等）也要随便填一个值，如 `local` |
 | 模型 | 默认 `deepseek-flash` |
 | 防抖延迟（毫秒） | 100–60000，默认 400 |
@@ -82,22 +85,88 @@
 
 数字项留空或无效时使用默认值，超出范围时取最近的边界值。
 
+### API 格式
+
+| 选项 | 请求 | Key 放在 |
+|---|---|---|
+| 自动（默认） | 按下面的[接口自动探测规则](#接口自动探测规则)选择格式和地址 | 按实际使用的格式 |
+| Google Gemini 原生 | `POST {地址}/models/{模型}:generateContent` | `x-goog-api-key` 请求头 |
+| OpenAI 兼容 | `POST {地址}/chat/completions` | `Authorization: Bearer` 请求头 |
+
+选了 Gemini 原生或 OpenAI 兼容时，只按该格式请求填写的地址，不做任何探测。
+
+### 接口自动探测规则
+
+API 格式为「自动」时，第一次请求按以下顺序探测，选中可用的接口后记住它。
+
+**1. 先看模型名**
+
+- 模型名包含 `gemini` 或 `gemma`（不区分大小写）：先探测 Gemini 原生接口，见第 2 步。
+- 其它模型：直接使用 OpenAI 兼容接口，不做探测。原因是 new-api 等中转虽然也能把 Gemini 格式的请求转给 GPT 等模型，但实测会丢掉系统提示词，建议质量明显变差。
+
+**2. 依次尝试的 Gemini 原生地址**
+
+由填写的 API 地址推出，按顺序尝试，重复的只试一次：
+
+1. 地址以 `/openai` 结尾（Google AI Studio 的 OpenAI 兼容地址）：去掉 `/openai`；
+2. 地址以 `/v1` 结尾（中转的常见写法）：把 `/v1` 换成 `/v1beta`；
+3. 地址里没有版本号（如 `/v1`、`/v1beta`）：在末尾加上 `/v1beta`；
+4. 地址本身。
+
+每个地址后面拼上 `/models/{模型}:generateContent`。例如模型为 `gemini-3.8-flash`：
+
+| 填写的 API 地址 | 依次尝试的 Gemini 原生地址 | 最后回退的 OpenAI 兼容地址 |
+|---|---|---|
+| `https://ai.llc.moe/v1` | `https://ai.llc.moe/v1beta` → `https://ai.llc.moe/v1` | `https://ai.llc.moe/v1/chat/completions` |
+| `https://generativelanguage.googleapis.com/v1beta/openai` | `…/v1beta` → `…/v1beta/openai` | `…/v1beta/openai/chat/completions` |
+| `https://generativelanguage.googleapis.com/v1beta` | `…/v1beta` | `…/v1beta/chat/completions` |
+| `https://api.example.com` | `https://api.example.com/v1beta` → `https://api.example.com` | `https://api.example.com/chat/completions` |
+
+所以 API 地址照常填 OpenAI 兼容地址即可。
+
+**3. 什么时候换下一个地址**
+
+| 情况 | 处理 |
+|---|---|
+| 返回任意 HTTP 错误（包括 400、401、404、429） | 换下一个地址。有的中转对 Gemini 路由上不存在的模型返回 Google 风格的 400，所以 400 也要继续试 |
+| 响应不是 JSON，或不是 Gemini 格式（没有 `candidates`） | 换下一个地址 |
+| 直连时的网络错误或 CORS 错误 | 换下一个地址 |
+| 请求超时、用户取消、内核 forwardProxy 转发失败 | 不再尝试，直接提示错误（换地址也只会更慢） |
+| 模型已经应答，但只有思考内容、输出被截断或被安全策略拦截 | 不再尝试，直接提示对应原因（说明接口是通的） |
+
+所有 Gemini 地址都不行时，改用 OpenAI 兼容格式请求填写的地址。
+
+**4. 都失败时提示哪个错误**
+
+默认提示 OpenAI 兼容请求的错误。但如果它只是「接口不存在」一类的错误（404、405、非 Google 风格的错误、响应格式不对、网络错误），而 Gemini 给出了明确原因（例如 Key 无效、额度用尽），就提示 Gemini 的错误，避免真实原因被一个 404 盖住。
+
+**5. 记住结果**
+
+- 成功的格式和地址按「API 地址 + 模型」保存在插件数据里（最多 20 条），之后直接使用，重启思源也不必重新探测。
+- 修改 API 地址或模型后会重新探测。
+- 已保存的接口出现 404、405、响应格式不对、网络错误等「不支持」的错误时，删除记录并重新探测；临时的限流（429）或服务端错误（5xx）只提示错误，不改变已保存的格式。
+- 第一次探测最多会多发几次失败的请求，之后每次只发一个请求。
+
+探测到 Gemini 原生后，额外请求参数里的 OpenAI 写法会自动换算，见[额外请求参数](#额外请求参数)。
 ### 额外请求参数
 
-这里填写一个 JSON 对象，会合并进 chat completions 请求体，主要用来关闭思考模式（一句话的预测开思考既慢又费 token）。
+这里填写一个 JSON 对象，会合并进请求体，主要用来调低或关闭思考（一句话的预测开思考既慢又费 token）。
 
-- 可以覆盖 `temperature`、`max_tokens`（默认 80），但不能覆盖 `model`、`messages`、`stream`。
+- 两种格式的参数可以写在同一个对象里，每种格式只取自己的字段：
+  - **Gemini 原生**取 `generationConfig`、`safetySettings` 等 Gemini 请求的顶层字段，按对象逐层合并，例如只写 `{"generationConfig":{"thinkingConfig":{"thinkingLevel":"low"}}}` 不会影响温度。
+  - **OpenAI 兼容**取其余字段，可以覆盖 `temperature`、`max_tokens`（默认 80），但不能覆盖 `model`、`messages`、`stream`。
+- 走 Gemini 原生、又没有在 `generationConfig` 里设置对应项时，沿用 OpenAI 写法：`reasoning_effort` 换算成 `thinkingConfig`（2.5 系列换成 `thinkingBudget`，none/minimal 按 low 处理），`max_tokens` 换算成 `maxOutputTokens`（默认 1024）。所以原来为 Gemini 的 OpenAI 兼容接口写的参数可以直接用。
 - 必须是 JSON 对象，否则保存时会提示错误并保留原值。
 
 | 服务商 | 额外请求参数 |
 |---|---|
 | DeepSeek / 智谱 | `{"thinking":{"type":"disabled"}}`（默认值） |
 | 通义千问（DashScope） | `{"enable_thinking":false}` |
-| Gemini 3.x Flash | `{"reasoning_effort":"minimal","max_tokens":512}`（3.8 Flash 最低只能 `"low"`） |
+| Gemini 3.x / 4.x（原生或 OpenAI 兼容均可） | `{"reasoning_effort":"low","max_tokens":512}`，或原生写法 `{"generationConfig":{"thinkingConfig":{"thinkingLevel":"low"}}}` |
 | Gemini 2.5 Flash | `{"reasoning_effort":"none"}` |
 | OpenAI 及其它不认识这些字段的服务商 | 留空 |
 
-**Gemini**：API 地址填 `https://generativelanguage.googleapis.com/v1beta/openai`。Gemini 的 `max_tokens` 包含思考 token，默认的 80 可能在输出正文之前就用完，所以要像上表那样加上 `"max_tokens":512`。如果模型只返回了思考内容，或者输出被截断，插件会提示你关闭思考或调大 `max_tokens`。
+**Gemini**：API 地址填 `https://generativelanguage.googleapis.com/v1beta` 或它的 OpenAI 兼容地址 `…/v1beta/openai` 都可以，「自动」会改用原生接口。Gemini 3 及以后不能完全关闭思考，而输出上限包含思考 token，所以建议把思考调低，例如 `{"generationConfig":{"thinkingConfig":{"thinkingLevel":"low"}}}`，或者沿用上表的 `{"reasoning_effort":"low"}`（实测 3.8 Flash 默认思考等级下一句要约 11 秒，low 约 2 秒）。如果模型只返回了思考内容或输出被截断，插件会提示调低思考或调大输出上限；被安全策略拦截时也会提示原因。
 
 ### CORS 与 forwardProxy
 

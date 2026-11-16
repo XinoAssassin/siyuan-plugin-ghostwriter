@@ -2,13 +2,16 @@ import { Menu, Plugin, Setting, getAllEditor, getFrontend, showMessage, IProtyle
 import { GhostWriter } from "./ghost";
 import type { BarLabels } from "./mobile";
 import {
-  GhostWriterError, PROMPT_KEYS, REQUEST_TIMEOUT_MS, defaultPrompt, isDefaultPrompt, normalizeBaseURL, parseExtraBody,
-  promptLangFor, type GWMode, type PromptKey, type PromptLang,
+  API_FORMATS, DEFAULT_BASE_URLS, DEFAULT_EXTRA_BODIES, GhostWriterError, PROMPT_KEYS, REQUEST_TIMEOUT_MS, defaultPrompt,
+  isDefaultPrompt, normalizeBaseURL, parseExtraBody, promptLangFor,
+  type APIFormat, type EndpointCache, type GWMode, type PromptKey, type PromptLang, type ResolvedEndpoint,
 } from "./llm";
 import "./index.css";
 
 export interface GWConfig {
   enabled: boolean;
+  /** 接口格式：auto（先探测 Gemini 原生，失败回退 OpenAI 兼容）、Gemini 原生或 OpenAI 兼容 */
+  apiFormat: APIFormat;
   baseURL: string;
   apiKey: string;
   model: string;
@@ -43,7 +46,8 @@ const DOC_MODES: DocMode[] = ["off", "write", "revise"];
 
 const DEFAULT_CONFIG: GWConfig = {
   enabled: true,
-  baseURL: "https://api.deepseek.com",
+  apiFormat: "auto",
+  baseURL: DEFAULT_BASE_URLS.auto,
   apiKey: "",
   model: "deepseek-flash",
   delay: 400,
@@ -51,7 +55,7 @@ const DEFAULT_CONFIG: GWConfig = {
   triggerChars: "，。！？；：,.!?;:",
   useProxy: false,
   chainAfterAccept: true,
-  extraBody: '{"thinking":{"type":"disabled"}}',
+  extraBody: DEFAULT_EXTRA_BODIES.auto,
   systemPrompt: "",
   userTemplate: "",
   reviseSystemPrompt: "",
@@ -67,6 +71,9 @@ const STORAGE = "config.json";
  * 0.1.0 的旧格式 { "enabled": [rootID] } 读取时视为写作模式。
  */
 const DOCS_STORAGE = "docs.json";
+/** auto 格式的探测结果：{ "<地址>|<模型>": { format, base } }，重启后不必重新探测 */
+const ENDPOINTS_STORAGE = "endpoints.json";
+const MAX_ENDPOINTS = 20;
 const BREADCRUMB_ID = "gw-doc-toggle";
 /** 同一条错误提示的最短间隔 */
 const ERROR_REPEAT_MS = 60000;
@@ -79,12 +86,27 @@ export default class GhostWriterPlugin extends Plugin {
   private docModes = new Map<string, GWMode>();
   private breadcrumbId = BREADCRUMB_ID;
   private errorShownAt = new Map<string, number>();
+  private endpoints = new Map<string, ResolvedEndpoint>();
+  /** auto 格式的探测结果缓存，变化时写入 endpoints.json */
+  readonly endpointCache: EndpointCache = {
+    get: (sig) => this.endpoints.get(sig),
+    set: (sig, value) => {
+      const old = this.endpoints.get(sig);
+      if (old?.format === value.format && old.base === value.base) return;
+      this.endpoints.delete(sig);
+      this.endpoints.set(sig, value);
+      while (this.endpoints.size > MAX_ENDPOINTS) this.endpoints.delete(this.endpoints.keys().next().value!);
+      this.saveEndpoints();
+    },
+    delete: (sig) => { if (this.endpoints.delete(sig)) this.saveEndpoints(); },
+  };
   /** 思源移动端界面（App 或手机浏览器）：启用键盘上方的操作栏和点按采纳 */
   readonly isMobile = ["mobile", "browser-mobile"].includes(getFrontend());
 
   async onload() {
     this.loadConfig(await this.loadData(STORAGE));
     this.loadDocModes(await this.loadData(DOCS_STORAGE));
+    this.loadEndpoints(await this.loadData(ENDPOINTS_STORAGE));
     this.initSetting();
 
     this.addIcons(`<symbol id="${ICON_ID}" viewBox="0 0 32 32">
@@ -136,6 +158,7 @@ export default class GhostWriterPlugin extends Plugin {
     for (const key of PROMPT_KEYS) {
       if (isDefaultPrompt(key, this.config[key])) this.config[key] = "";
     }
+    if (!API_FORMATS.includes(this.config.apiFormat)) this.config.apiFormat = DEFAULT_CONFIG.apiFormat;
   }
 
   /** 读取 docs.json；兼容 0.1.0 的 { enabled: [rootID] }（视为写作模式） */
@@ -148,6 +171,19 @@ export default class GhostWriterPlugin extends Plugin {
         if (mode === "write" || mode === "revise") this.docModes.set(id, mode);
       }
     }
+  }
+
+  private loadEndpoints(saved: any) {
+    if (!saved || typeof saved !== "object") return;
+    for (const [sig, v] of Object.entries(saved as Record<string, any>)) {
+      if ((v?.format === "gemini" || v?.format === "openai") && typeof v.base === "string" && normalizeBaseURL(v.base)) {
+        this.endpoints.set(sig, { format: v.format, base: v.base });
+      }
+    }
+  }
+
+  private saveEndpoints() {
+    this.saveData(ENDPOINTS_STORAGE, Object.fromEntries(this.endpoints));
   }
 
   /** 把预测失败提示给用户：本地化、去掉 API Key、截断，同一条消息 60 秒内只提示一次 */
@@ -330,7 +366,7 @@ export default class GhostWriterPlugin extends Plugin {
   // ---------- 设置面板 ----------
 
   private initSetting() {
-    const inputs: Partial<Record<keyof GWConfig, HTMLInputElement | HTMLTextAreaElement>> = {};
+    const inputs: Partial<Record<keyof GWConfig, HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>> = {};
     const text = (key: keyof GWConfig, type = "text") => {
       const el = document.createElement("input");
       el.className = "b3-text-field fn__flex-center fn__size200";
@@ -358,6 +394,8 @@ export default class GhostWriterPlugin extends Plugin {
           return raw && Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : DEFAULT_CONFIG[key];
         };
         this.config.enabled = (inputs.enabled as HTMLInputElement).checked;
+        const format = inputs.apiFormat!.value as APIFormat;
+        if (API_FORMATS.includes(format)) this.config.apiFormat = format;
         const baseURL = normalizeBaseURL(inputs.baseURL!.value);
         if (baseURL) this.config.baseURL = baseURL;
         else showMessage(t.errBaseURL, 5000, "error");
@@ -384,6 +422,23 @@ export default class GhostWriterPlugin extends Plugin {
     });
     const t = this.i18n as Record<string, string>;
     this.setting.addItem({ title: t.enabled, createActionElement: () => check("enabled") });
+    this.setting.addItem({ title: t.apiFormat, description: t.apiFormatDesc, createActionElement: () => {
+      const el = document.createElement("select");
+      el.className = "b3-select fn__flex-center fn__size200";
+      const labels: Record<APIFormat, string> = { auto: t.apiFormatAuto, gemini: t.apiFormatGemini, openai: t.apiFormatOpenAI };
+      for (const f of API_FORMATS) el.add(new Option(labels[f], f, false, f === this.config.apiFormat));
+      let previous = this.config.apiFormat;
+      // 切换格式时，地址和额外参数若还是上一种格式的默认值，就换成新格式的默认值；用户改过的不动
+      el.addEventListener("change", () => {
+        const next = el.value as APIFormat;
+        const url = inputs.baseURL, extra = inputs.extraBody;
+        if (url && normalizeBaseURL(url.value) === DEFAULT_BASE_URLS[previous]) url.value = DEFAULT_BASE_URLS[next];
+        if (extra && extra.value.trim() === DEFAULT_EXTRA_BODIES[previous]) extra.value = DEFAULT_EXTRA_BODIES[next];
+        previous = next;
+      });
+      inputs.apiFormat = el;
+      return el;
+    } });
     this.setting.addItem({ title: t.baseURL, createActionElement: () => text("baseURL") });
     this.setting.addItem({ title: t.apiKey, createActionElement: () => text("apiKey", "password") });
     this.setting.addItem({ title: t.model, createActionElement: () => text("model") });

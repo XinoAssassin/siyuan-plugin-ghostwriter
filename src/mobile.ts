@@ -94,6 +94,21 @@ export function charIndexAt(textNode: Text, x: number, y: number): number {
   return best;
 }
 
+/**
+ * 把已显示的 position: fixed 元素放到 getBoundingClientRect 坐标系中的 (left, top)。
+ * Chrome 里两套坐标一致；iOS Safari 弹出键盘、页面被推上去时，客户端坐标与 fixed 定位坐标相差
+ * visualViewport.offsetTop。先按目标值设置，再用元素自身的矩形量出偏差并扣除，不依赖具体浏览器的行为。
+ */
+export function placeFixed(el: HTMLElement, left: number, top: number) {
+  el.style.left = left + "px";
+  el.style.top = top + "px";
+  const r = el.getBoundingClientRect();
+  const dx = r.left - left;
+  const dy = r.top - top;
+  if (Math.abs(dx) > 0.5) el.style.left = left - dx + "px";
+  if (Math.abs(dy) > 0.5) el.style.top = top - dy + "px";
+}
+
 export interface BarLabels {
   accept: string;
   regenerate: string;
@@ -188,7 +203,11 @@ export class MobileBar {
     this.position();
   }
 
-  /** 顶边：思源键盘工具栏可见时在它上方，否则在可视区域（软键盘之上）的底部 */
+  /**
+   * 顶边：思源键盘工具栏可见时在它上方，否则在可视区域（软键盘之上）的底部。
+   * 全部用 position: fixed 的坐标计算，与思源定位键盘工具栏的方式一致（visualViewport.offsetTop + height）；
+   * 不能用工具栏的 getBoundingClientRect：iOS Safari 键盘弹出时它与 fixed 坐标相差 offsetTop。
+   */
   position = () => {
     if (!this.visible) return;
     const vv = window.visualViewport;
@@ -203,11 +222,13 @@ export class MobileBar {
       }
     }
     if (toolbar && toolbar.offsetHeight > 0 && !toolbar.classList.contains("fn__none")) {
-      const top = toolbar.getBoundingClientRect().top;
-      if (top > 0 && top < bottom) bottom = top;
+      // 工具栏也是 position: fixed：浏览器里思源写入 top，App 里用 bottom: 0，计算值都是 fixed 坐标下的顶边
+      const top = parseFloat(getComputedStyle(toolbar).top);
+      if (Number.isFinite(top) && top > 0 && top < bottom) bottom = top;
     }
-    this.el.style.left = (vv?.offsetLeft ?? 0) + "px";
-    this.el.style.width = (vv?.width ?? window.innerWidth) + "px";
+    // 与思源工具栏一样铺满布局视口的宽度
+    this.el.style.left = "0px";
+    this.el.style.width = "100%";
     this.el.style.top = Math.max(0, bottom - this.el.offsetHeight) + "px";
   };
 

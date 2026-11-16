@@ -1,7 +1,7 @@
 {
   "toggle": "Toggle ghost writer",
   "settingTitle": "Ghost Writer",
-  "baseURL": "API base URL (OpenAI compatible, e.g. https://api.deepseek.com/v1)",
+  "baseURL": "API base URL (OpenAI compatible, e.g. https://api.deepseek.com/v1; Gemini native, e.g. https://generativelanguage.googleapis.com/v1beta)",
   "apiKey": "API key",
   "model": "Model",
   "delay": "Debounce delay (ms)",
@@ -10,7 +10,7 @@
   "useProxy": "Route via kernel forwardProxy (bypass CORS)",
   "enabled": "Enabled",
   "extraBody": "Extra request body (JSON)",
-  "extraBodyDesc": "Use it to disable thinking. DeepSeek / Zhipu: {\"thinking\":{\"type\":\"disabled\"}}; Qwen: {\"enable_thinking\":false}; leave empty for providers that reject unknown fields; Gemini 3.x Flash: {\"reasoning_effort\":\"minimal\"} (3.8 Flash supports \"low\" at minimum); Gemini 2.5 Flash: {\"reasoning_effort\":\"none\"}. Gemini counts thinking tokens in max_tokens, so add \"max_tokens\":512 here to override the default 80",
+  "extraBodyDesc": "Merged into the request body object by object. You can put parameters for both formats together; each format takes only its own fields. Gemini native takes generationConfig and the like, e.g. {\"generationConfig\":{\"thinkingConfig\":{\"thinkingLevel\":\"low\"}}} (2.5 models: \"thinkingBudget\":0 disables thinking); maxOutputTokens defaults to 1024. OpenAI compatible takes the other fields, used to disable thinking: DeepSeek / Zhipu {\"thinking\":{\"type\":\"disabled\"}}; Qwen {\"enable_thinking\":false}; Gemini 3.x {\"reasoning_effort\":\"low\"}; Gemini 2.5 Flash {\"reasoning_effort\":\"none\"}; max_tokens defaults to 80, add \"max_tokens\":512 for Gemini.",
   "temperature": "Temperature (0–2, lower is more conservative)",
   "systemPrompt": "Writing mode · System prompt",
   "systemPromptDesc": "Writing mode: the caret is at the end of a paragraph; only the preceding text is read and the next sentence is predicted. Saving it empty restores the default. The default follows the SiYuan interface language (Chinese / English).",
@@ -45,5 +45,12 @@
   "barRegenerate": "Another",
   "barDismiss": "Dismiss suggestion",
   "barContinue": "Continue",
-  "errContinueAtEnd": "Ghost Writer: in Writing mode, Continue only works at the end of a paragraph. Move the caret to the end, or switch to Revision mode."
+  "errContinueAtEnd": "Ghost Writer: in Writing mode, Continue only works at the end of a paragraph. Move the caret to the end, or switch to Revision mode.",
+  "apiFormat": "API format",
+  "apiFormatDesc": "Auto (default): probes the Gemini native format first, trying the base URL with /openai removed, with /v1 changed to /v1beta, and as entered; if none supports it, uses the OpenAI-compatible format. The result is remembered per base URL and model, so probing happens only once. Gemini native: POST {base}/models/{model}:generateContent, key in the x-goog-api-key header. OpenAI compatible: POST {base}/chat/completions, key in the Authorization header.",
+  "apiFormatOpenAI": "OpenAI compatible (chat/completions)",
+  "apiFormatGemini": "Google Gemini native (generateContent)",
+  "errBlocked": "Ghost Writer: the request was blocked by the model's safety policy ({reason}); no suggestion was returned",
+  "errNoContentGemini": "Ghost Writer: the model returned no text (only thinking, or the output was cut off). In \"Extra request body\", lower thinking or raise the output limit, e.g. {\"generationConfig\":{\"thinkingConfig\":{\"thinkingLevel\":\"low\"},\"maxOutputTokens\":2048}}; Gemini 2.5 can disable thinking with \"thinkingBudget\":0",
+  "apiFormatAuto": "Auto (Gemini native first, OpenAI compatible if unsupported)"
 }

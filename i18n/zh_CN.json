@@ -1,7 +1,7 @@
 {
   "toggle": "开关写稿助手",
   "settingTitle": "写稿助手",
-  "baseURL": "API 地址（OpenAI 兼容，如 https://api.deepseek.com/v1）",
+  "baseURL": "API 地址（OpenAI 兼容如 https://api.deepseek.com/v1；Gemini 原生如 https://generativelanguage.googleapis.com/v1beta）",
   "apiKey": "API Key",
   "model": "模型",
   "delay": "防抖延迟（毫秒）",
@@ -10,7 +10,7 @@
   "useProxy": "通过内核 forwardProxy 转发（规避 CORS）",
   "enabled": "启用",
   "extraBody": "额外请求参数（JSON）",
-  "extraBodyDesc": "用于关闭思考模式。DeepSeek / 智谱：{\"thinking\":{\"type\":\"disabled\"}}；通义千问：{\"enable_thinking\":false}；OpenAI 等不认识的厂商请留空；Gemini 3.x Flash：{\"reasoning_effort\":\"minimal\"}（3.8 Flash 最低只能 \"low\"）；Gemini 2.5 Flash：{\"reasoning_effort\":\"none\"}。Gemini 的 max_tokens 包含思考 token，可在此追加 \"max_tokens\":512 覆盖默认的 80",
+  "extraBodyDesc": "按对象合并进请求体，两种格式的参数可以写在一起，每种格式只取自己的字段。Gemini 原生取 generationConfig 等字段，例如 {\"generationConfig\":{\"thinkingConfig\":{\"thinkingLevel\":\"low\"}}}（2.5 系列用 \"thinkingBudget\":0 关闭思考），默认 maxOutputTokens 为 1024。OpenAI 兼容取其余字段，用于关闭思考：DeepSeek / 智谱 {\"thinking\":{\"type\":\"disabled\"}}；通义千问 {\"enable_thinking\":false}；Gemini 3.x {\"reasoning_effort\":\"low\"}；Gemini 2.5 Flash {\"reasoning_effort\":\"none\"}；默认 max_tokens 为 80，Gemini 需追加 \"max_tokens\":512。",
   "temperature": "温度（0–2，越低越保守）",
   "systemPrompt": "写作模式 · 系统提示词",
   "systemPromptDesc": "写作模式：光标在段落末尾、只读取上文，预测下一句。留空保存会恢复默认。默认值跟随思源界面语言（中文 / 英文）。",
@@ -45,5 +45,12 @@
   "barRegenerate": "换一句",
   "barDismiss": "关闭建议",
   "barContinue": "续写",
-  "errContinueAtEnd": "写稿助手：写作模式只能在段落末尾续写，请把光标移到段尾，或切换到改稿模式"
+  "errContinueAtEnd": "写稿助手：写作模式只能在段落末尾续写，请把光标移到段尾，或切换到改稿模式",
+  "apiFormat": "API 格式",
+  "apiFormatDesc": "自动（默认）：先按 Gemini 原生格式探测，依次尝试 去掉 /openai、把 /v1 换成 /v1beta、地址本身；都不支持时改用 OpenAI 兼容格式。探测结果按「地址 + 模型」记住，之后不再重复探测。Gemini 原生：POST {地址}/models/{模型}:generateContent，Key 放在 x-goog-api-key 头。OpenAI 兼容：POST {地址}/chat/completions，Key 放在 Authorization 头。",
+  "apiFormatOpenAI": "OpenAI 兼容（chat/completions）",
+  "apiFormatGemini": "Google Gemini 原生（generateContent）",
+  "errBlocked": "写稿助手：请求被模型的安全策略拦截（{reason}），没有返回建议",
+  "errNoContentGemini": "写稿助手：模型没有返回正文（只有思考内容或输出被截断）。请在“额外请求参数”中调低思考或调大输出上限，例如 {\"generationConfig\":{\"thinkingConfig\":{\"thinkingLevel\":\"low\"},\"maxOutputTokens\":2048}}；Gemini 2.5 可用 \"thinkingBudget\":0 关闭思考",
+  "apiFormatAuto": "自动（优先 Gemini 原生，不支持时用 OpenAI 兼容）"
 }
